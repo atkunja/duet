@@ -97,6 +97,7 @@ pub fn run() {
             commands::get_run,
             commands::get_diff,
             commands::run_project_command,
+            commands::cancel_project_command,
             commands::apply_changes,
             commands::discard_run,
             commands::doctor,

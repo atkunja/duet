@@ -21,10 +21,11 @@ export const api = {
   listRuns: () => nativeOrDemo(() => invoke<RunSummary[]>("list_runs"), () => demoRuns),
   getRun: (runId:string) => nativeOrDemo(() => invoke<RunDetail>("get_run",{runId}), () => demoRun(runId)),
   getDiff: (runId:string) => nativeOrDemo(() => invoke<string>("get_diff",{runId}), () => ""),
-  runProjectCommand: (projectId:string,command:string) => nativeOrDemo(
-    () => invoke<VerificationResult>("run_project_command",{projectId,command}),
+  runProjectCommand: (projectId:string,command:string,operationId:string) => nativeOrDemo(
+    () => invoke<VerificationResult>("run_project_command",{projectId,command,operationId}),
     () => demoVerification(command),
   ),
+  cancelProjectCommand: (operationId:string) => invoke<void>("cancel_project_command",{operationId}),
   applyChanges: (runId:string) => invoke<void>("apply_changes",{runId}),
   discardRun: (runId:string) => invoke<void>("discard_run",{runId}),
   doctor: () => nativeOrDemo(() => invoke<DoctorReport>("doctor"), () => demoDoctor),

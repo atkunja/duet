@@ -24,3 +24,4 @@ export type RunEvent =
 
 export type DetailTab = "summary"|"activity"|"files"|"diff"|"tests"|"review"|"logs";
 export interface LiveLog { text:string; receivedAt:string }
+export interface ConsoleOutputEvent { operationId:string; stream:string; chunk:string }

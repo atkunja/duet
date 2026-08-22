@@ -14,6 +14,7 @@ use crate::{
     AppState,
 };
 use chrono::Utc;
+use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -210,9 +211,11 @@ pub fn get_run(state: State<'_, AppState>, run_id: String) -> CommandResult<RunD
 
 #[tauri::command]
 pub async fn run_project_command(
+    app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     command: String,
+    operation_id: String,
 ) -> CommandResult<crate::models::VerificationResult> {
     let command = command.trim().to_string();
     if command.is_empty() {
@@ -222,7 +225,8 @@ pub async fn run_project_command(
     let operation_key = repository_operation_key(&project.path)?;
     begin_operation(&state, &operation_key)?;
     let token = CancellationToken::new();
-    let operation_id = format!("console:{}", Uuid::new_v4());
+    let event_operation_id = operation_id.clone();
+    let operation_id = format!("console:{operation_id}");
     state
         .active_runs
         .lock()
@@ -236,13 +240,46 @@ pub async fn run_project_command(
         },
         Path::new(&project.path),
         token,
-        Arc::new(|_: &str, _: &str| {}) as OutputCallback,
+        Arc::new(move |stream: &str, chunk: &str| {
+            let _ = app.emit(
+                "duet://console-output",
+                ConsoleOutputEvent {
+                    operation_id: event_operation_id.clone(),
+                    stream: stream.to_string(),
+                    chunk: chunk.to_string(),
+                },
+            );
+        }) as OutputCallback,
     )
     .await
     .map_err(err);
     state.active_runs.lock().remove(&operation_id);
     state.run_operations.lock().remove(&operation_key);
     result
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsoleOutputEvent {
+    operation_id: String,
+    stream: String,
+    chunk: String,
+}
+
+#[tauri::command]
+pub fn cancel_project_command(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> CommandResult<()> {
+    let key = format!("console:{operation_id}");
+    let token = state
+        .active_runs
+        .lock()
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| "command is not running".to_string())?;
+    token.cancel();
+    Ok(())
 }
 
 #[tauri::command]
