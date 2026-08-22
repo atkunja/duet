@@ -69,7 +69,7 @@ impl Agent for MockAgent {
     async fn execute(&self, request: AgentRequest, cancel: CancellationToken) -> Result<AgentResult> {
         if cancel.is_cancelled() { return Err(anyhow!("process cancelled")); }
         tokio::time::sleep(Duration::from_millis(350)).await;
-        let output = match request.role {
+        let output: String = match request.role {
             AgentRole::Architect => r#"{"goal":"Complete the requested change","summary":"Inspect existing conventions, implement the smallest compatible change, and cover it with tests.","files_to_modify":[],"files_to_add":[],"implementation_steps":["Inspect relevant modules","Implement behavior","Add tests","Run verification"],"risks":["Behavioral regression"],"tests_required":["Existing test suite","New regression test"]}"#.into(),
             AgentRole::Reviewer => r#"{"verdict":"pass","summary":"Objective checks pass and no material defects were found.","issues":[]}"#.into(),
             AgentRole::Implementer => {
