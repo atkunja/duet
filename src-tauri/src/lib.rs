@@ -1,5 +1,6 @@
 mod agents;
 pub mod codex_app_server;
+pub mod codex_runtime;
 mod commands;
 mod db;
 mod git;
@@ -30,7 +31,7 @@ pub struct AppState {
     worktrees_root: std::path::PathBuf,
     active_runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     run_operations: Arc<Mutex<HashSet<String>>>,
-    codex_server: Arc<AsyncMutex<Option<codex_app_server::CodexAppServerClient>>>,
+    codex_server: Arc<AsyncMutex<Option<codex_runtime::CodexRuntime>>>,
     _instance_lock: File,
 }
 
@@ -110,7 +111,12 @@ pub fn run() {
             commands::apply_changes,
             commands::discard_run,
             commands::doctor,
-            commands::list_codex_models
+            commands::list_codex_models,
+            commands::start_codex_thread,
+            commands::start_codex_turn,
+            commands::interrupt_codex_turn,
+            commands::respond_codex_request,
+            commands::reject_codex_request
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Duet");

@@ -1,8 +1,9 @@
 use crate::{
     codex_app_server::{
-        AppServerConfig, AppServerError, ClientInfo, CodexAppServerClient, ModelInfo,
-        ModelListParams,
+        AppServerConfig, AppServerError, ClientInfo, ModelInfo, ModelListParams, ThreadStartParams,
+        TurnStartParams,
     },
+    codex_runtime::{CodexRuntime, CodexRuntimeConfig, CodexRuntimeError, RuntimeRequestToken},
     git,
     models::{
         DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest,
@@ -32,46 +33,57 @@ fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-async fn codex_app_server(state: &State<'_, AppState>) -> CommandResult<CodexAppServerClient> {
+async fn codex_runtime(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> CommandResult<CodexRuntime> {
     let mut server = state.codex_server.lock().await;
-    if server.as_ref().is_some_and(CodexAppServerClient::is_closed) {
+    if server.as_ref().is_some_and(CodexRuntime::is_closed) {
         *server = None;
     }
     if let Some(client) = server.as_ref() {
         return Ok(client.clone());
     }
     let binary = resolve_binary("codex").ok_or_else(|| "Codex CLI was not found".to_string())?;
-    let client = CodexAppServerClient::spawn(AppServerConfig::new(
+    let runtime = CodexRuntime::spawn(CodexRuntimeConfig::new(AppServerConfig::new(
         binary,
         ClientInfo::duet(env!("CARGO_PKG_VERSION")),
-    ))
+    )))
     .await
     .map_err(err)?;
-    *server = Some(client.clone());
-    Ok(client)
+    let mut events = runtime.subscribe_events().await;
+    let event_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Ok(event) = events.recv().await {
+            let _ = event_app.emit("duet://codex-event", event);
+        }
+    });
+    *server = Some(runtime.clone());
+    Ok(runtime)
 }
 
 #[tauri::command]
-pub async fn list_codex_models(state: State<'_, AppState>) -> CommandResult<Vec<ModelInfo>> {
-    let client = codex_app_server(&state).await?;
+pub async fn list_codex_models(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<ModelInfo>> {
+    let client = codex_runtime(&app, &state).await?;
     match collect_codex_models(&client).await {
         Ok(models) => Ok(models),
-        Err(AppServerError::ConnectionClosed { .. }) => {
+        Err(CodexRuntimeError::AppServer(AppServerError::ConnectionClosed { .. })) => {
             let mut server = state.codex_server.lock().await;
-            if server.as_ref().is_some_and(CodexAppServerClient::is_closed) {
+            if server.as_ref().is_some_and(CodexRuntime::is_closed) {
                 *server = None;
             }
             drop(server);
-            let retry = codex_app_server(&state).await?;
+            let retry = codex_runtime(&app, &state).await?;
             collect_codex_models(&retry).await.map_err(err)
         }
         Err(error) => Err(err(error)),
     }
 }
 
-async fn collect_codex_models(
-    client: &CodexAppServerClient,
-) -> Result<Vec<ModelInfo>, AppServerError> {
+async fn collect_codex_models(client: &CodexRuntime) -> Result<Vec<ModelInfo>, CodexRuntimeError> {
     let mut cursor = None;
     let mut seen_cursors = HashSet::new();
     let mut seen_models = HashSet::new();
@@ -93,13 +105,111 @@ async fn collect_codex_models(
             break;
         };
         if !seen_cursors.insert(next_cursor.clone()) || seen_cursors.len() > 64 {
-            return Err(AppServerError::Protocol(
+            return Err(CodexRuntimeError::AppServer(AppServerError::Protocol(
                 "model/list returned an invalid cursor sequence".into(),
-            ));
+            )));
         }
         cursor = Some(next_cursor);
     }
     Ok(models)
+}
+
+#[tauri::command]
+pub async fn start_codex_thread(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    model: String,
+) -> CommandResult<crate::codex_app_server::ThreadInfo> {
+    let project = state.db.get_project(&project_id).map_err(err)?;
+    let response = codex_runtime(&app, &state)
+        .await?
+        .start_thread(ThreadStartParams {
+            model: Some(model),
+            cwd: Some(project.path),
+            approval_policy: Some("never".into()),
+            sandbox: Some("readOnly".into()),
+            personality: Some("friendly".into()),
+            service_name: Some("duet_desktop".into()),
+            ephemeral: true,
+            ..ThreadStartParams::default()
+        })
+        .await
+        .map_err(err)?;
+    Ok(response.thread)
+}
+
+#[tauri::command]
+pub async fn start_codex_turn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    thread_id: String,
+    prompt: String,
+    model: String,
+    effort: String,
+) -> CommandResult<crate::codex_app_server::TurnInfo> {
+    if prompt.trim().is_empty() {
+        return Err("enter a message for Codex".into());
+    }
+    let project = state.db.get_project(&project_id).map_err(err)?;
+    let mut params = TurnStartParams::text(thread_id, prompt.trim());
+    params.cwd = Some(project.path);
+    params.approval_policy = Some("never".into());
+    params.model = Some(model);
+    params.effort = Some(effort);
+    codex_runtime(&app, &state)
+        .await?
+        .start_turn(params)
+        .await
+        .map(|response| response.turn)
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn interrupt_codex_turn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    thread_id: String,
+    turn_id: String,
+) -> CommandResult<()> {
+    codex_runtime(&app, &state)
+        .await?
+        .interrupt_turn(&thread_id, &turn_id)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn respond_codex_request(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: RuntimeRequestToken,
+    result: serde_json::Value,
+) -> CommandResult<()> {
+    codex_runtime(&app, &state)
+        .await?
+        .respond_success(&token, result)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn reject_codex_request(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: RuntimeRequestToken,
+) -> CommandResult<()> {
+    codex_runtime(&app, &state)
+        .await?
+        .respond_error(
+            &token,
+            -32_002,
+            "Duet's read-only assistant declined this request",
+            None,
+        )
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
