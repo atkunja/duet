@@ -32,6 +32,7 @@ The machine has the final say. A positive model review never overrides a failing
 - Run Codex as architect/reviewer and Claude as implementer/repairer through supported headless CLI modes.
 - Choose Duet, Codex-only, or Claude-only routing and configure each active agent's model and reasoning effort.
 - Discover installed Codex models and their supported reasoning levels through the official local Codex App Server protocol.
+- Ask a repository-aware Codex assistant questions through streamed App Server turns in a read-only sandbox.
 - Run project commands in a streaming, cancellable Console and inspect loopback development servers in a sandboxed Preview panel.
 - Run a required test/build command and any configured benchmark independently of model opinion.
 - Repeat review/repair up to a user-selected bound and stop on repeated no-op repairs.
@@ -166,7 +167,7 @@ React / TypeScript
               │
 Rust / Tauri / Tokio
   ├─ agent adapters (Claude and Codex JSONL normalization)
-  ├─ Codex App Server JSON-RPC transport and model discovery
+  ├─ fail-closed Codex App Server runtime, model discovery, and streamed threads
   ├─ task graph and bounded workflow executor
   ├─ cancellable process-tree and Console streaming
   ├─ deterministic verification
@@ -205,6 +206,7 @@ No state is scattered into a selected repository except files an agent intention
 - Repositories and their local configuration must be trusted; the Claude CLI safe mode is not an OS-level write sandbox.
 - CLI authentication detection depends on each installed CLI's status command and may report “not detectable.”
 - Agent escalation (Codex implementing after repeated Claude failures) is represented by role-independent adapters but is not exposed as an automatic policy yet.
+- The integrated Codex assistant is intentionally read-only and ephemeral; file changes still go through a verified Duet run.
 - `duet.toml` is documented and modeled conceptually but GUI command overrides are the active configuration path in V1.
 - Benchmark output is retained generically; metric-specific latency/throughput parsers are future work.
 - Interrupted OS processes are terminated by application shutdown and cannot be resumed; only their state and worktree are recovered.
