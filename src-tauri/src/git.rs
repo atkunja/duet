@@ -4,32 +4,36 @@ use crate::{
     tooling::resolve_binary,
 };
 use anyhow::{anyhow, Context, Result};
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .await
-        .context("launch git")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    let binary = resolve_binary("git").context("Git executable not found")?;
+    let mut process_args = vec!["-C".into(), repo.to_string_lossy().into()];
+    process_args.extend(args.iter().map(|value| (*value).into()));
+    let output = run_process(
+        ProcessRequest {
+            program: binary.to_string_lossy().into(),
+            args: process_args,
+            cwd: repo.into(),
+            timeout: Duration::from_secs(120),
+            env: vec![],
+            stdin: None,
+        },
+        CancellationToken::new(),
+        Arc::new(|_: &str, _: &str| {}) as OutputCallback,
+    )
+    .await
+    .context("launch git")?;
+    if !output.success {
+        return Err(anyhow!("git {}: {}", args.join(" "), output.stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string())
+    Ok(output.stdout.trim_end().to_string())
 }
 
 #[cfg(test)]
@@ -199,10 +203,16 @@ pub async fn diff(worktree: &Path, base_sha: &str) -> Result<String> {
     Ok(patch)
 }
 
+pub async fn patch_sha256(worktree: &Path, base_sha: &str) -> Result<String> {
+    let patch = diff(worktree, base_sha).await?;
+    Ok(format!("{:x}", Sha256::digest(patch.as_bytes())))
+}
+
 pub async fn apply_worktree_changes(
     repo: &Path,
     worktree: &Path,
     expected_head: &str,
+    verified_patch_sha256: &str,
 ) -> Result<()> {
     let current = git(repo, &["rev-parse", "HEAD"]).await?;
     if current != expected_head {
@@ -218,6 +228,12 @@ pub async fn apply_worktree_changes(
     let patch = diff(worktree, expected_head).await?;
     if patch.is_empty() {
         return Err(anyhow!("run contains no changes"));
+    }
+    let current_patch_sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+    if current_patch_sha256 != verified_patch_sha256 {
+        return Err(anyhow!(
+            "the isolated worktree changed after verification; apply aborted"
+        ));
     }
     apply_patch(repo, &patch, true).await?;
     apply_patch(repo, &patch, false).await?;
@@ -285,7 +301,8 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f.path == "feature.txt"));
-        apply_worktree_changes(source.path(), &worktree, &base)
+        let digest = patch_sha256(&worktree, &base).await.unwrap();
+        apply_worktree_changes(source.path(), &worktree, &base, &digest)
             .await
             .unwrap();
         assert_eq!(
@@ -311,9 +328,30 @@ mod tests {
             .await
             .unwrap()
             .contains("committed.txt"));
-        apply_worktree_changes(source.path(), &worktree, &base)
+        let digest = patch_sha256(&worktree, &base).await.unwrap();
+        apply_worktree_changes(source.path(), &worktree, &base, &digest)
             .await
             .unwrap();
         assert!(source.path().join("committed.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn refuses_worktree_changes_made_after_verification() {
+        let source = tempfile::tempdir().unwrap();
+        tests_support::init_repo(source.path()).await;
+        let base = git(source.path(), &["rev-parse", "HEAD"]).await.unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        let (worktree, _) = create_worktree(source.path(), managed.path(), "late-change", &base)
+            .await
+            .unwrap();
+        std::fs::write(worktree.join("verified.txt"), "reviewed\n").unwrap();
+        let digest = patch_sha256(&worktree, &base).await.unwrap();
+        std::fs::write(worktree.join("verified.txt"), "changed later\n").unwrap();
+
+        let error = apply_worktree_changes(source.path(), &worktree, &base, &digest)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after verification"));
+        assert!(!source.path().join("verified.txt").exists());
     }
 }
