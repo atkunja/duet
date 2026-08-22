@@ -27,13 +27,13 @@ export const api = {
   ),
   cancelProjectCommand: (operationId:string) => invoke<void>("cancel_project_command",{operationId}),
   openLocalPreview: (url:string) => invoke<void>("open_local_preview",{url}),
-  openProjectInEditor: (projectId:string) => invoke<string>("open_project_in_editor",{projectId}),
-  openRunInEditor: (runId:string) => invoke<string>("open_run_in_editor",{runId}),
+  openProjectInEditor: (projectId:string) => nativeOrDemo(() => invoke<string>("open_project_in_editor",{projectId}), () => "Development preview"),
+  openRunInEditor: (runId:string) => nativeOrDemo(() => invoke<string>("open_run_in_editor",{runId}), () => "Development preview"),
   applyChanges: (runId:string) => invoke<void>("apply_changes",{runId}),
   discardRun: (runId:string) => invoke<void>("discard_run",{runId}),
   doctor: () => nativeOrDemo(() => invoke<DoctorReport>("doctor"), () => demoDoctor),
   getPreferences: () => nativeOrDemo<AppPreferences>(() => invoke<AppPreferences>("get_preferences"), () => ({editor:"auto",maxRepairs:3})),
-  savePreferences: (preferences:AppPreferences) => invoke<void>("save_preferences",{preferences}),
+  savePreferences: (preferences:AppPreferences) => nativeOrDemo(() => invoke<void>("save_preferences",{preferences}), () => undefined),
   listCodexModels: () => nativeOrDemo(
     () => invoke<CodexModelInfo[]>("list_codex_models"),
     () => [

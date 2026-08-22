@@ -245,7 +245,7 @@ export function CodexAgentTool({ project }: { project: Project }) {
     void loadModels();
   };
 
-  return <section className="codex-agent-tool" role="tabpanel">
+  return <section className="codex-agent-tool">
     <header className="codex-agent-bar">
       <div><Bot size={14}/><strong>Codex assistant</strong><span><ShieldCheck size={11}/>Read-only</span></div>
       <div>
