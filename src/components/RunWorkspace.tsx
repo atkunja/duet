@@ -1,4 +1,4 @@
-import { AlertCircle, ArrowDownToLine, Braces, Check, ChevronRight, Code2, ExternalLink, FileCode2, GitApply, ListTree, ScrollText, ShieldCheck, Square, TerminalSquare, TestTube2, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowDownToLine, Braces, ChevronRight, Code2, ExternalLink, FileCode2, GitMerge, ListTree, ScrollText, ShieldCheck, Square, TerminalSquare, TestTube2, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type { DetailTab, RunDetail } from "../types";
@@ -13,7 +13,7 @@ export function RunWorkspace({run,diff,liveLogs,onStop,onApply,onDiscard,busyAct
   return <main className="run-page">
     <header className="topbar run-header"><div><div className="run-kicker"><span>RUN #{shortId(run.id)}</span><StatusBadge status={run.status}/></div><h1>{run.task}</h1><p>{run.projectName} · {run.worktreePath?"Isolated worktree":"Preparing worktree"}</p></div><div className="header-actions">
       {run.worktreePath&&<button className="secondary-button" onClick={()=>openPath(run.worktreePath!)}><ExternalLink size={14}/> Open worktree</button>}
-      {active?<button className="danger-button" onClick={onStop}><Square size={13} fill="currentColor"/> Stop run</button>:<button className="primary-button compact" disabled={!!busyAction||run.status!=="completed"} onClick={onApply}><GitApply size={15}/>{busyAction==="apply"?"Applying…":"Apply changes"}</button>}
+      {active?<button className="danger-button" onClick={onStop}><Square size={13} fill="currentColor"/> Stop run</button>:<button className="primary-button compact" disabled={!!busyAction||run.status!=="completed"} onClick={onApply}><GitMerge size={15}/>{busyAction==="apply"?"Applying…":"Apply changes"}</button>}
     </div></header>
     <div className="tabs">{tabs.map(item=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>setTab(item.id)}><item.icon size={14}/>{item.label}{item.id==="files"&&run.changedFiles.length>0?<span>{run.changedFiles.length}</span>:null}</button>)}</div>
     <section className="run-content">
