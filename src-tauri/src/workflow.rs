@@ -46,7 +46,7 @@ pub async fn execute(ctx: WorkflowContext) -> Result<()> {
     refresh_changes(&ctx, &worktree).await?;
 
     let mut verification_results = run_verification(&ctx, &worktree).await?;
-    let mut review = review(&ctx, codex.as_ref(), &worktree, &architecture_json, &verification_results).await?;
+    let mut review = perform_review(&ctx, codex.as_ref(), &worktree, &architecture_json, &verification_results).await?;
     let mut last_diff = git::diff(&worktree).await.unwrap_or_default();
     let mut unchanged_repairs = 0u8;
     let mut round = 0u8;
@@ -63,7 +63,7 @@ pub async fn execute(ctx: WorkflowContext) -> Result<()> {
         last_diff = new_diff;
         refresh_changes(&ctx, &worktree).await?;
         verification_results = run_verification(&ctx, &worktree).await?;
-        review = review(&ctx, codex.as_ref(), &worktree, &architecture_json, &verification_results).await?;
+        review = perform_review(&ctx, codex.as_ref(), &worktree, &architecture_json, &verification_results).await?;
         if unchanged_repairs >= 2 { break; }
     }
 
@@ -106,7 +106,7 @@ async fn run_verification(ctx:&WorkflowContext, worktree:&Path) -> Result<Vec<Ve
     Ok(results)
 }
 
-async fn review(ctx:&WorkflowContext, codex:&dyn Agent, worktree:&Path, architecture:&str, verification_results:&[VerificationResult]) -> Result<crate::models::ReviewResult> {
+async fn perform_review(ctx:&WorkflowContext, codex:&dyn Agent, worktree:&Path, architecture:&str, verification_results:&[VerificationResult]) -> Result<crate::models::ReviewResult> {
     let full_diff=git::diff(worktree).await?;
     let diff=if full_diff.len()>300_000 { format!("{}\n…[diff truncated]",&full_diff[..full_diff.floor_char_boundary(300_000)]) } else { full_diff };
     let result=run_agent(ctx,codex,AgentRole::Reviewer,"review",worktree,prompts::reviewer(&ctx.request.task,architecture,&diff,&verification::summarize(verification_results))).await?;
