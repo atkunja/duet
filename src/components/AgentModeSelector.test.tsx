@@ -59,6 +59,26 @@ describe("AgentModeSelector", () => {
     });
   });
 
+  it("uses each discovered model's supported reasoning efforts and default", () => {
+    const onChange = vi.fn();
+    render(<AgentModeSelector
+      value={{ ...defaultAgentModeSelection, mode: "codex", codex: { model: "sol", reasoning: "high" } }}
+      onChange={onChange}
+      codexModels={[
+        { value: "sol", label: "Sol", defaultReasoning: "low", reasoningEfforts: ["low", "high"] },
+        { value: "frontier", label: "Frontier", defaultReasoning: "ultra", reasoningEfforts: ["max", "ultra"] },
+      ]}
+    />);
+
+    expect(screen.getByRole("combobox", { name: "Codex reasoning" })).not.toContainHTML("Maximum");
+    fireEvent.change(screen.getByRole("combobox", { name: "Codex model" }), { target: { value: "frontier" } });
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...defaultAgentModeSelection,
+      mode: "codex",
+      codex: { model: "frontier", reasoning: "ultra" },
+    });
+  });
+
   it("marks cloud as coming soon and prevents selection until supported", () => {
     const onChange = vi.fn();
     const { rerender } = render(<AgentModeSelector value={defaultAgentModeSelection} onChange={onChange} />);

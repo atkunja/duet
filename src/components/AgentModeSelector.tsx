@@ -3,7 +3,7 @@ import { useId } from "react";
 
 export type AgentMode = "duet" | "codex" | "claude";
 export type ExecutionLocation = "local" | "cloud";
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface AgentConfiguration {
   model: string;
@@ -20,6 +20,8 @@ export interface AgentModeSelection {
 export interface ModelOption {
   value: string;
   label: string;
+  defaultReasoning?: ReasoningEffort;
+  reasoningEfforts?: readonly ReasoningEffort[];
 }
 
 export interface AgentModeSelectorProps {
@@ -52,10 +54,13 @@ const defaultClaudeModels: readonly ModelOption[] = [
 ];
 
 const reasoningOptions: readonly { value: ReasoningEffort; label: string }[] = [
+  { value: "minimal", label: "Minimal" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
   { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Maximum" },
+  { value: "ultra", label: "Ultra" },
 ];
 
 const modes: readonly {
@@ -102,6 +107,8 @@ function AgentControls({
   const agentKey = agent.toLowerCase();
   const modelId = `${idPrefix}-${agentKey}-model`;
   const reasoningId = `${idPrefix}-${agentKey}-reasoning`;
+  const selectedModel = models.find((model) => model.value === value.model);
+  const supportedEfforts = selectedModel?.reasoningEfforts?.length ? selectedModel.reasoningEfforts : reasoningOptions.map(option => option.value);
 
   return (
     <section className={`agent-mode-selector__agent agent-mode-selector__agent--${agentKey}`} aria-labelledby={`${idPrefix}-${agentKey}-title`}>
@@ -119,7 +126,12 @@ function AgentControls({
             aria-label={`${agent} model`}
             value={value.model}
             disabled={disabled}
-            onChange={(event) => onChange({ ...value, model: event.target.value })}
+            onChange={(event) => {
+              const model = models.find((option) => option.value === event.target.value);
+              const supported = model?.reasoningEfforts?.length ? model.reasoningEfforts : reasoningOptions.map(option => option.value);
+              const reasoning = supported.includes(value.reasoning) ? value.reasoning : model?.defaultReasoning ?? supported[0] ?? value.reasoning;
+              onChange({ model: event.target.value, reasoning });
+            }}
           >
             {models.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
           </select>
@@ -133,7 +145,7 @@ function AgentControls({
             disabled={disabled}
             onChange={(event) => onChange({ ...value, reasoning: event.target.value as ReasoningEffort })}
           >
-            {reasoningOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            {reasoningOptions.filter(option => supportedEfforts.includes(option.value)).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </label>
       </div>
