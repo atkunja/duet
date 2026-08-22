@@ -14,7 +14,7 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
   const [liveOutput, setLiveOutput] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
-  const [url, setUrl] = useState("http://127.0.0.1:3000");
+  const [url, setUrl] = useState("http://localhost:3000");
   const [loadedUrl, setLoadedUrl] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const outputRef = useRef<HTMLPreElement>(null);
@@ -124,7 +124,7 @@ function scrollOutput(output: HTMLPreElement | null) {
 
 export function normalizeLocalUrl(value: string) {
   const trimmed = value.trim();
-  const candidate = !trimmed ? "http://127.0.0.1:3000" : /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  const candidate = !trimmed ? "http://localhost:3000" : /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
   const parsed = new URL(candidate);
   if (!['http:', 'https:'].includes(parsed.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) {
     throw new Error("Preview URLs must use localhost, 127.0.0.1, or ::1");

@@ -82,14 +82,53 @@ pub async fn inspect_repository(path: &Path) -> Result<RepoInspection> {
 }
 
 fn detect_project(root: &Path) -> (String, String, String) {
+    let cargo_test = if root.join("Cargo.toml").exists() {
+        Some("cargo test")
+    } else if root.join("src-tauri/Cargo.toml").exists() {
+        Some("cargo test --manifest-path src-tauri/Cargo.toml")
+    } else {
+        None
+    };
+    if root.join("package.json").exists() {
+        let package = std::fs::read_to_string(root.join("package.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let manager = package
+            .as_ref()
+            .and_then(|value| value.get("packageManager"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.split('@').next())
+            .filter(|value| matches!(*value, "pnpm" | "yarn" | "bun" | "npm"))
+            .or_else(|| root.join("pnpm-lock.yaml").exists().then_some("pnpm"))
+            .or_else(|| root.join("yarn.lock").exists().then_some("yarn"))
+            .or_else(|| root.join("bun.lockb").exists().then_some("bun"))
+            .unwrap_or("npm");
+        let has_node_tests = package
+            .as_ref()
+            .and_then(|value| value.pointer("/scripts/test"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|script| !script.trim().is_empty());
+        let node_test = format!("{manager} test");
+        if let (Some(cargo_test), true) = (cargo_test, has_node_tests) {
+            return (
+                "TypeScript / JavaScript / Rust".into(),
+                format!("{manager} + Cargo"),
+                format!("{node_test} && {cargo_test}"),
+            );
+        }
+        if cargo_test.is_none() {
+            return (
+                "TypeScript / JavaScript".into(),
+                format!("Node ({manager})"),
+                node_test,
+            );
+        }
+        if let Some(cargo_test) = cargo_test {
+            return ("Rust".into(), "Cargo".into(), cargo_test.into());
+        }
+    }
     let candidates = [
         ("Cargo.toml", "Rust", "Cargo", "cargo test"),
-        (
-            "package.json",
-            "TypeScript / JavaScript",
-            "Node",
-            "npm test",
-        ),
         ("pyproject.toml", "Python", "Python", "pytest -q"),
         ("requirements.txt", "Python", "Python", "pytest -q"),
         ("go.mod", "Go", "Go modules", "go test ./..."),
@@ -291,6 +330,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
         assert_eq!(detect_project(dir.path()).0, "Rust");
+    }
+
+    #[test]
+    fn detects_pnpm_and_cargo_monorepos_as_mixed_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@10.9.0","scripts":{"test":"pnpm -r test"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'").unwrap();
+
+        assert_eq!(
+            detect_project(dir.path()),
+            (
+                "TypeScript / JavaScript / Rust".into(),
+                "pnpm + Cargo".into(),
+                "pnpm test && cargo test".into(),
+            )
+        );
+    }
+
+    #[test]
+    fn detects_pnpm_and_nested_tauri_cargo_as_mixed_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src-tauri")).unwrap();
+        std::fs::write(dir.path().join("src-tauri/Cargo.toml"), "[package]").unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@10.9.0","scripts":{"test":"vitest run"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_project(dir.path()),
+            (
+                "TypeScript / JavaScript / Rust".into(),
+                "pnpm + Cargo".into(),
+                "pnpm test && cargo test --manifest-path src-tauri/Cargo.toml".into(),
+            )
+        );
     }
 
     #[tokio::test]

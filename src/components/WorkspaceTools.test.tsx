@@ -61,6 +61,7 @@ describe("WorkspaceTools", () => {
   it("loads a normalized local preview URL", () => {
     render(<WorkspaceTools project={project} onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+    expect(screen.getByRole("textbox", { name: "Preview URL" })).toHaveValue("http://localhost:3000");
     fireEvent.change(screen.getByRole("textbox", { name: "Preview URL" }), { target: { value: "localhost:4173" } });
     fireEvent.click(screen.getByRole("button", { name: "Load preview" }));
     expect(screen.getByTitle("Local application preview")).toHaveAttribute("src", "http://localhost:4173/");
