@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <rect width="1280" height="760" rx="20" fill="#0c0d10"/>
+  <rect x="1" y="1" width="1278" height="758" rx="19" fill="none" stroke="#2b2d33"/>
+  <rect x="0" width="240" height="760" rx="20" fill="#111216"/>
+  <path d="M240 0v760" stroke="#26282e"/>
+  <rect x="272" y="94" width="970" height="1" fill="#292b31"/>
+  <text x="40" y="62" fill="#ebe8df" font-family="Arial" font-size="22" font-weight="700">D  Duet</text>
+  <text x="276" y="53" fill="#777b84" font-family="monospace" font-size="11">NATIVE LOCAL ORCHESTRATION</text>
+  <text x="276" y="76" fill="#efede6" font-family="Arial" font-size="20" font-weight="700">Duet desktop interface</text>
+  <rect x="360" y="190" width="790" height="380" rx="14" fill="#15161a" stroke="#2c2e34"/>
+  <circle cx="755" cy="280" r="36" fill="#1c211e" stroke="#2c3930"/>
+  <text x="743" y="290" fill="#a3d4b3" font-family="Arial" font-size="28">D</text>
+  <text x="533" y="350" fill="#ebe8df" font-family="Arial" font-size="25" font-weight="700">Codex thinks. Claude builds.</text>
+  <text x="557" y="380" fill="#777b84" font-family="Arial" font-size="14">Duet verifies everything locally.</text>
+  <rect x="525" y="430" width="460" height="56" rx="9" fill="#111216" stroke="#2c2e34"/>
+  <text x="552" y="464" fill="#868a93" font-family="Arial" font-size="13">Screenshot generated after the first product run</text>
+</svg>
