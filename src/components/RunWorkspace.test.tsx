@@ -3,8 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { RunDetail } from "../types";
 import { parseSplitDiff, RunWorkspace } from "./RunWorkspace";
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn(() => Promise.resolve()) }));
-
 const run = (overrides: Partial<RunDetail> = {}): RunDetail => ({
   id: "run-12345678",
   projectId: "project-a",
@@ -37,7 +35,7 @@ const handlers = {
   onApply: vi.fn(),
   onDiscard: vi.fn(),
   onOpenEditor: vi.fn(),
-  onError: vi.fn(),
+  onReveal: vi.fn(),
 };
 
 describe("RunWorkspace", () => {
@@ -48,6 +46,8 @@ describe("RunWorkspace", () => {
     expect(screen.getByRole("tab", { name: "Summary" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("button", { name: /apply changes/i })).toBeEnabled();
     expect(screen.getByText(/changes remain isolated/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    expect(handlers.onReveal).toHaveBeenCalledOnce();
   });
 
   it("keeps discarded history inspectable without stale worktree controls", () => {

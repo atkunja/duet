@@ -8,9 +8,10 @@ USER TASK:
 REPOSITORY OVERVIEW:
 {overview}
 
-Return ONLY a JSON object with: goal, summary, files_to_modify, files_to_add,
-implementation_steps, risks, tests_required. Be concrete about concurrency, security,
-compatibility, migrations, edge cases, failure modes, and test strategy."#
+Return ONLY a JSON object with this exact shape:
+{{"goal":"string","summary":"string","files_to_modify":["path: change"],"files_to_add":["path: purpose"],"implementation_steps":["step"],"risks":["risk and mitigation"],"tests_required":["test"]}}.
+Every array item must be a string. Be concrete about concurrency, security, compatibility,
+migrations, edge cases, failure modes, and test strategy."#
     )
 }
 

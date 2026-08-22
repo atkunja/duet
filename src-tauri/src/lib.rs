@@ -134,6 +134,7 @@ pub fn run() {
             commands::list_runs,
             commands::get_run,
             commands::get_diff,
+            commands::reveal_run,
             commands::run_project_command,
             commands::cancel_project_command,
             commands::open_local_preview,

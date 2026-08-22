@@ -21,6 +21,7 @@ export const api = {
   listRuns: () => nativeOrDemo(() => invoke<RunSummary[]>("list_runs"), () => demoRuns),
   getRun: (runId:string) => nativeOrDemo(() => invoke<RunDetail>("get_run",{runId}), () => demoRun(runId)),
   getDiff: (runId:string) => nativeOrDemo(() => invoke<string>("get_diff",{runId}), () => ""),
+  revealRun: (runId:string) => nativeOrDemo(() => invoke<void>("reveal_run",{runId}), () => undefined),
   runProjectCommand: (projectId:string,command:string,operationId:string) => nativeOrDemo(
     () => invoke<VerificationResult>("run_project_command",{projectId,command,operationId}),
     () => demoVerification(command),

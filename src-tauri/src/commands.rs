@@ -644,6 +644,33 @@ pub async fn get_diff(state: State<'_, AppState>, run_id: String) -> CommandResu
 }
 
 #[tauri::command]
+pub fn reveal_run(app: AppHandle, state: State<'_, AppState>, run_id: String) -> CommandResult<()> {
+    let info = state.db.apply_info(&run_id).map_err(err)?;
+    let stored = info
+        .worktree_path
+        .ok_or_else(|| "run has no worktree to reveal".to_string())?;
+    let path = validated_reveal_path(&state.worktrees_root, &run_id, Path::new(&stored))?;
+    app.opener().reveal_item_in_dir(path).map_err(err)
+}
+
+fn validated_reveal_path(root: &Path, run_id: &str, stored: &Path) -> CommandResult<PathBuf> {
+    let expected = root.join(run_id).join("implementation");
+    if stored != expected {
+        return Err("refusing to reveal a path outside this run's managed worktree".into());
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "Duet's managed worktree directory is unavailable".to_string())?;
+    let canonical_path = stored
+        .canonicalize()
+        .map_err(|_| "this run's worktree no longer exists".to_string())?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("refusing to reveal a path outside Duet's managed worktrees".into());
+    }
+    Ok(canonical_path)
+}
+
+#[tauri::command]
 pub async fn apply_changes(state: State<'_, AppState>, run_id: String) -> CommandResult<()> {
     if state.active_runs.lock().contains_key(&run_id) {
         return Err("cannot apply changes while the run is active".into());
@@ -1088,7 +1115,7 @@ async fn bounded_tool_output(path: &Path, args: &[&str]) -> Option<(bool, String
 mod tests {
     use super::{
         clear_codex_thread_generation, ensure_codex_generation, sequence_has_gap,
-        validate_preferences, AppPreferences, CodexThreadOwner,
+        validate_preferences, validated_reveal_path, AppPreferences, CodexThreadOwner,
     };
     use parking_lot::Mutex;
     use std::collections::HashMap;
@@ -1118,6 +1145,18 @@ mod tests {
             max_repairs: 0,
         })
         .is_err());
+    }
+
+    #[test]
+    fn reveal_paths_must_be_the_exact_managed_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = root.path().join("run-1/implementation");
+        std::fs::create_dir_all(&expected).unwrap();
+        assert_eq!(
+            validated_reveal_path(root.path(), "run-1", &expected).unwrap(),
+            expected.canonicalize().unwrap()
+        );
+        assert!(validated_reveal_path(root.path(), "run-1", root.path()).is_err());
     }
 
     #[test]

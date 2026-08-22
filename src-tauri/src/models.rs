@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -178,17 +178,97 @@ pub struct ReviewResult {
 #[serde(rename_all = "camelCase")]
 pub struct ArchitecturePlan {
     pub goal: String,
+    #[serde(deserialize_with = "deserialize_plan_text")]
     pub summary: String,
-    #[serde(default, alias = "files_to_modify")]
+    #[serde(
+        default,
+        alias = "files_to_modify",
+        deserialize_with = "deserialize_plan_text_list"
+    )]
     pub files_to_modify: Vec<String>,
-    #[serde(default, alias = "files_to_add")]
+    #[serde(
+        default,
+        alias = "files_to_add",
+        deserialize_with = "deserialize_plan_text_list"
+    )]
     pub files_to_add: Vec<String>,
-    #[serde(default, alias = "implementation_steps")]
+    #[serde(
+        default,
+        alias = "implementation_steps",
+        deserialize_with = "deserialize_plan_text_list"
+    )]
     pub implementation_steps: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_plan_text_list")]
     pub risks: Vec<String>,
-    #[serde(default, alias = "tests_required")]
+    #[serde(
+        default,
+        alias = "tests_required",
+        deserialize_with = "deserialize_plan_text_list"
+    )]
     pub tests_required: Vec<String>,
+}
+
+fn deserialize_plan_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(plan_value_text(&value))
+}
+
+fn deserialize_plan_text_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(plan_value_text)
+            .filter(|item| !item.is_empty())
+            .collect(),
+        other => {
+            let text = plan_value_text(&other);
+            (!text.is_empty()).then_some(text).into_iter().collect()
+        }
+    })
+}
+
+fn plan_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(plan_value_text)
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Object(map) => {
+            if let Some(path) = map.get("path").and_then(serde_json::Value::as_str) {
+                let changes = map.get("changes").map(plan_value_text).unwrap_or_default();
+                return if changes.is_empty() {
+                    path.into()
+                } else {
+                    format!("{path}: {}", changes.replace('\n', "; "))
+                };
+            }
+            if let Some(risk) = map.get("risk").and_then(serde_json::Value::as_str) {
+                let mitigation = map
+                    .get("mitigation")
+                    .map(plan_value_text)
+                    .unwrap_or_default();
+                return if mitigation.is_empty() {
+                    risk.into()
+                } else {
+                    format!("{risk} Mitigation: {mitigation}")
+                };
+            }
+            serde_json::to_string(value).unwrap_or_default()
+        }
+        other => other.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

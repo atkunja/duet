@@ -316,6 +316,19 @@ mod tests {
         assert_eq!(plan.implementation_steps, vec!["edit"]);
     }
     #[test]
+    fn accepts_detailed_architecture_values_from_codex() {
+        let plan=parse_architecture(r#"{"goal":"g","summary":["first finding","second finding"],"files_to_modify":[{"path":"src/app.ts","changes":["move parser","add limit"]}],"files_to_add":[],"implementation_steps":["edit"],"risks":[{"risk":"signature breakage","mitigation":"test raw bytes"}],"tests_required":["test"]}"#).unwrap();
+        assert_eq!(plan.summary, "first finding\nsecond finding");
+        assert_eq!(
+            plan.files_to_modify,
+            vec!["src/app.ts: move parser; add limit"]
+        );
+        assert_eq!(
+            plan.risks,
+            vec!["signature breakage Mitigation: test raw bytes"]
+        );
+    }
+    #[test]
     fn parses_nonempty_snake_case_review_issues() {
         let review=parse_review(r#"{"verdict":"fail","summary":"bug","issues":[{"severity":"high","category":"correctness","file":"src/a.rs","line":4,"problem":"wrong","reason":"breaks","suggested_fix":"repair"}]}"#).unwrap();
         assert_eq!(review.issues[0].suggested_fix, "repair");
