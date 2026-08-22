@@ -15,7 +15,7 @@ export function TaskComposer({project,onRun,busy}:{project:Project;onRun:(reques
     <header className="topbar"><div><span className="eyebrow">NEW TASK</span><h1>{project.name}</h1></div><div className="topbar-actions"><div className="repo-meta"><GitBranch size={14}/><span>{project.language}</span><i/> <span>{project.buildSystem}</span></div><button className={`secondary-button ${toolsOpen?"selected":""}`} aria-pressed={toolsOpen} onClick={()=>setToolsOpen(value=>!value)}><PanelRight size={14}/>Tools</button></div></header>
     <div className={`composer-wrap ${toolsOpen?"tools-open":""}`}>
       <div className="composer-main">
-        <div className="composer-heading"><span className="duet-symbol"><Sparkles size={22}/></span><h2>What do you want Duet to build?</h2><p>Codex plans and reviews. Claude implements and repairs. Duet verifies the result.</p></div>
+        <div className="composer-heading"><span className="duet-symbol"><Sparkles size={22}/></span><h2>What do you want {modeName(agents.mode)} to build?</h2><p>{modeDescription(agents.mode)}</p></div>
         <div className="task-card">
         <textarea aria-label="Software engineering task" autoFocus value={task} onChange={e=>setTask(e.target.value)} placeholder="Describe a feature, bug fix, refactor, or performance goal…" onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")submit()}}/>
         <details className="agent-settings">
@@ -28,7 +28,7 @@ export function TaskComposer({project,onRun,busy}:{project:Project;onRun:(reques
           <label><span>Benchmark <em>optional</em></span><input value={benchmark} onChange={e=>setBenchmark(e.target.value)} placeholder="e.g. cargo bench"/></label>
           <label><span>Repair rounds</span><select value={repairs} onChange={e=>setRepairs(Number(e.target.value))}><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
         </div>
-        <div className="composer-footer"><label className="check-row"><input type="checkbox" checked={mock} onChange={e=>setMock(e.target.checked)}/><FlaskConical size={15}/><span>Mock agents</span><small>No Claude/Codex usage</small></label><button className="primary-button" disabled={!task.trim()||!test.trim()||busy} onClick={submit}><Play size={15} fill="currentColor"/>{busy?"Starting…":"Run Duet"}<kbd>⌘ ↵</kbd></button></div>
+        <div className="composer-footer"><label className="check-row"><input type="checkbox" checked={mock} onChange={e=>setMock(e.target.checked)}/><FlaskConical size={15}/><span>Mock agents</span><small>No Claude/Codex usage</small></label><button className="primary-button" disabled={!task.trim()||!test.trim()||busy} onClick={submit}><Play size={15} fill="currentColor"/>{busy?"Starting…":`Run ${modeName(agents.mode)}`}<kbd>⌘ ↵</kbd></button></div>
         </div>
         <div className="privacy-note"><ShieldCheck size={15}/><span>Duet stores data locally and delegates only through your configured official CLIs, which connect to their respective services.</span></div>
       </div>
@@ -38,6 +38,7 @@ export function TaskComposer({project,onRun,busy}:{project:Project;onRun:(reques
 }
 
 function modeName(mode:"duet"|"codex"|"claude"){return mode==="duet"?"Duet":mode==="codex"?"Codex":"Claude"}
+function modeDescription(mode:"duet"|"codex"|"claude"){return mode==="duet"?"Codex plans and reviews. Claude implements and repairs. Duet verifies the result.":mode==="codex"?"Codex carries the task from architecture through implementation and review.":"Claude carries the task from architecture through implementation and review."}
 function reasoningEffort(value:string|undefined):ReasoningEffort|undefined{return value&&["minimal","low","medium","high","xhigh","max","ultra"].includes(value)?value as ReasoningEffort:undefined}
 function WorkflowStrip({mode}:{mode:"duet"|"codex"|"claude"}){const planner=mode==="claude"?"claude":"codex";const builder=mode==="codex"?"codex":"claude";return <div className="workflow-strip"><AgentDot agent={planner}/><b>Plan</b><ArrowRight/><AgentDot agent={builder}/><b>Build</b><ArrowRight/><span className="verify-dot"><ShieldCheck/></span><b>Verify</b><ArrowRight/><AgentDot agent={planner}/><b>Review</b><ArrowRight/><AgentDot agent={builder}/><b>Repair</b></div>}
 function AgentDot({agent}:{agent:"codex"|"claude"}){return <span className={`agent ${agent}`}>{agent==="codex"?"CX":"CL"}</span>}

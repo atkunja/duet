@@ -51,4 +51,16 @@ describe("TaskComposer", () => {
     expect(screen.getByRole("textbox", { name: "Software engineering task" })).toHaveValue("");
     expect(screen.getByRole("textbox", { name: /test or build command/i })).toHaveValue("cargo test");
   });
+
+  it("routes a single-agent Codex run with matching copy and controls", () => {
+    const onRun = vi.fn();
+    render(<TaskComposer project={project()} onRun={onRun} busy={false} />);
+    fireEvent.click(screen.getByText("Models & routing"));
+    fireEvent.click(screen.getByRole("radio", { name: "Codex" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Software engineering task" }), { target: { value: "Improve search" } });
+
+    expect(screen.getByRole("heading", { name: /what do you want codex to build/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /run codex/i }));
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({ agentMode: "codex", task: "Improve search" }));
+  });
 });
