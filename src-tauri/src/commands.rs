@@ -1,4 +1,4 @@
-use crate::{db::Database, git, models::{DoctorReport, Project, RepoInspection, RunDetail, RunSummary, StartRunRequest, ToolStatus}, workflow::{self, WorkflowContext}, AppState};
+use crate::{git, models::{DoctorReport, Project, RepoInspection, RunDetail, RunSummary, StartRunRequest, ToolStatus}, workflow::{self, WorkflowContext}, AppState};
 use chrono::Utc;
 use std::{path::{Path, PathBuf}, process::Command};
 use tauri::{AppHandle, State};
