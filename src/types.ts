@@ -1,6 +1,6 @@
 export interface Project { id:string; name:string; path:string; language:string; buildSystem:string; testCommand:string; benchmarkCommand:string; lastUsedAt:string }
 export interface RepoInspection { path:string; branch:string; headSha:string; dirty:boolean; language:string; buildSystem:string; suggestedTestCommand:string }
-export interface StartRunRequest { projectId:string; task:string; testCommand:string; benchmarkCommand?:string; maxRepairs:number; mockAgents:boolean }
+export interface StartRunRequest { projectId:string; task:string; testCommand:string; benchmarkCommand?:string; maxRepairs:number; mockAgents:boolean; agentMode:"duet"|"codex"|"claude";executionLocation:"local"|"cloud";codexModel:string;claudeModel:string;codexReasoning:string;claudeReasoning:string }
 export interface RunSummary { id:string; projectId:string; projectName:string; task:string; status:string; currentStage:string; createdAt:string; completedAt?:string; worktreePath?:string; additions:number; deletions:number; appliedAt?:string; discardedAt?:string; error?:string }
 export interface StageRecord { id:number; runId:string; kind:string; agent:string; status:string; summary:string; rawOutput:string; normalizedOutput:string; startedAt:string; completedAt?:string; durationMs?:number }
 export interface ChangedFile { path:string; status:string; additions:number; deletions:number }
@@ -8,6 +8,7 @@ export interface VerificationResult { name:string; command:string; success:boole
 export interface RunDetail extends RunSummary { stages:StageRecord[]; architecture?:string; review?:string; verification:VerificationResult[]; changedFiles:ChangedFile[] }
 export interface ToolStatus { installed:boolean; authenticated?:boolean; path?:string; version?:string; detail:string }
 export interface DoctorReport { appDataWritable:boolean; databaseHealthy:boolean; git:ToolStatus; claude:ToolStatus; codex:ToolStatus; os:string }
+export interface CodexModelInfo { id:string; model:string; displayName:string; hidden:boolean; defaultReasoningEffort?:string; supportedReasoningEfforts:{reasoningEffort:string;description?:string}[]; inputModalities:string[]; supportsPersonality:boolean; isDefault:boolean; upgrade?:string }
 
 export type RunEvent =
   | {type:"runStarted";runId:string;task:string}

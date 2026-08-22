@@ -35,6 +35,34 @@ pub struct StartRunRequest {
     pub max_repairs: u8,
     #[serde(default)]
     pub mock_agents: bool,
+    #[serde(default = "default_agent_mode")]
+    pub agent_mode: String,
+    #[serde(default = "default_execution_location")]
+    pub execution_location: String,
+    #[serde(default = "default_codex_model")]
+    pub codex_model: String,
+    #[serde(default = "default_claude_model")]
+    pub claude_model: String,
+    #[serde(default = "default_reasoning")]
+    pub codex_reasoning: String,
+    #[serde(default = "default_reasoning")]
+    pub claude_reasoning: String,
+}
+
+fn default_agent_mode() -> String {
+    "duet".into()
+}
+fn default_execution_location() -> String {
+    "local".into()
+}
+fn default_codex_model() -> String {
+    "gpt-5.6-sol".into()
+}
+fn default_claude_model() -> String {
+    "sonnet".into()
+}
+fn default_reasoning() -> String {
+    "high".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
