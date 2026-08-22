@@ -1,10 +1,11 @@
-import { ExternalLink, Globe2, Play, RotateCw, Square, TerminalSquare, X } from "lucide-react";
+import { Bot, ExternalLink, Globe2, Play, RotateCw, Square, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { ConsoleOutputEvent, Project, VerificationResult } from "../types";
 import { api, errorMessage, isDevelopmentPreview, isTauriRuntime } from "../lib/api";
+import { CodexAgentTool } from "./CodexAgentTool";
 
-type ToolTab = "console" | "preview";
+type ToolTab = "agent" | "console" | "preview";
 
 export function WorkspaceTools({ project, onClose }: { project: Project; onClose: () => void }) {
   const [tab, setTab] = useState<ToolTab>("console");
@@ -81,11 +82,12 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
       <div role="tablist" aria-label="Workspace tools">
         <button role="tab" aria-selected={tab === "console"} className={tab === "console" ? "active" : ""} onClick={() => setTab("console")}><TerminalSquare size={14}/>Console</button>
         <button role="tab" aria-selected={tab === "preview"} className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}><Globe2 size={14}/>Preview</button>
+        <button role="tab" aria-selected={tab === "agent"} className={tab === "agent" ? "active" : ""} onClick={() => setTab("agent")}><Bot size={14}/>Codex</button>
       </div>
       <button className="tool-close" aria-label="Close workspace tools" onClick={onClose}><X size={15}/></button>
     </header>
 
-    {tab === "console" ? <section className="console-tool" role="tabpanel">
+    {tab === "agent" ? <CodexAgentTool project={project}/> : tab === "console" ? <section className="console-tool" role="tabpanel">
       <div className="console-actions">
         <button onClick={() => run("git status --short --branch")} disabled={running || !canRun}>Git status</button>
         {project.testCommand && <button onClick={() => run(project.testCommand)} disabled={running || !canRun}>Run tests</button>}
