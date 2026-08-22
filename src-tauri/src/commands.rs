@@ -317,6 +317,8 @@ async fn run_git_operation(
             timeout,
             env: vec![],
             stdin: None,
+            capture_limit: 1_000_000,
+            fail_on_output_limit: false,
         },
         CancellationToken::new(),
         Arc::new(|_: &str, _: &str| {}) as OutputCallback,

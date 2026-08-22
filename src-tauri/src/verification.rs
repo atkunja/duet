@@ -34,6 +34,8 @@ pub async fn execute(
             timeout: item.timeout,
             env: vec![("CI".into(), "1".into()), ("NO_COLOR".into(), "1".into())],
             stdin: None,
+            capture_limit: 1_000_000,
+            fail_on_output_limit: false,
         },
         cancel,
         callback,
