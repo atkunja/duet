@@ -30,6 +30,13 @@ pub struct WorkflowContext<R: Runtime = tauri::Wry> {
     pub cancel: CancellationToken,
 }
 
+type WorkflowAgents = (
+    Box<dyn Agent>,
+    Box<dyn Agent>,
+    Box<dyn Agent>,
+    Box<dyn Agent>,
+);
+
 pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     let mut task_graph = graph::default_workflow();
     task_graph.validate()?;
@@ -55,27 +62,81 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     ctx.db
         .set_run_worktree(&ctx.run_id, &branch, &worktree.to_string_lossy())?;
 
-    let (codex, claude): (Box<dyn Agent>, Box<dyn Agent>) = if ctx.request.mock_agents {
-        (
-            Box::new(MockAgent {
-                agent_name: "Codex",
-            }),
-            Box::new(MockAgent {
-                agent_name: "Claude",
-            }),
-        )
-    } else {
-        let codex_path = resolve_binary("codex")
-            .context("Codex CLI was not found in PATH or standard local install directories")?;
-        let claude_path = resolve_binary("claude")
-            .context("Claude Code was not found in PATH or standard local install directories")?;
-        (
-            Box::new(CodexAgent { binary: codex_path }),
-            Box::new(ClaudeAgent {
-                binary: claude_path,
-            }),
-        )
-    };
+    let (architect_agent, builder_agent, reviewer_agent, repair_agent): WorkflowAgents =
+        if ctx.request.mock_agents {
+            let (planning_name, building_name) = match ctx.request.agent_mode.as_str() {
+                "codex" => ("Codex", "Codex"),
+                "claude" => ("Claude", "Claude"),
+                _ => ("Codex", "Claude"),
+            };
+            (
+                Box::new(MockAgent {
+                    agent_name: planning_name,
+                }),
+                Box::new(MockAgent {
+                    agent_name: building_name,
+                }),
+                Box::new(MockAgent {
+                    agent_name: planning_name,
+                }),
+                Box::new(MockAgent {
+                    agent_name: building_name,
+                }),
+            )
+        } else {
+            let codex = if ctx.request.agent_mode != "claude" {
+                Some(CodexAgent {
+                    binary: resolve_binary("codex").context(
+                        "Codex CLI was not found in PATH or standard local install directories",
+                    )?,
+                    model: ctx.request.codex_model.clone(),
+                    reasoning: ctx.request.codex_reasoning.clone(),
+                })
+            } else {
+                None
+            };
+            let claude = if ctx.request.agent_mode != "codex" {
+                Some(ClaudeAgent {
+                    binary: resolve_binary("claude").context(
+                        "Claude Code was not found in PATH or standard local install directories",
+                    )?,
+                    model: ctx.request.claude_model.clone(),
+                    reasoning: ctx.request.claude_reasoning.clone(),
+                })
+            } else {
+                None
+            };
+            match ctx.request.agent_mode.as_str() {
+                "codex" => {
+                    let agent = codex.expect("validated Codex mode must initialize Codex");
+                    (
+                        Box::new(agent.clone()),
+                        Box::new(agent.clone()),
+                        Box::new(agent.clone()),
+                        Box::new(agent),
+                    )
+                }
+                "claude" => {
+                    let agent = claude.expect("validated Claude mode must initialize Claude");
+                    (
+                        Box::new(agent.clone()),
+                        Box::new(agent.clone()),
+                        Box::new(agent.clone()),
+                        Box::new(agent),
+                    )
+                }
+                _ => {
+                    let codex = codex.expect("Duet mode must initialize Codex");
+                    let claude = claude.expect("Duet mode must initialize Claude");
+                    (
+                        Box::new(codex.clone()),
+                        Box::new(claude.clone()),
+                        Box::new(codex),
+                        Box::new(claude),
+                    )
+                }
+            }
+        };
 
     let overview = format!(
         "Path: {}\nBranch: {}\nBase SHA: {}\nLanguage: {}\nBuild system: {}\nDirty source tree: {}",
@@ -88,7 +149,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     );
     let architecture_result = run_agent(
         &ctx,
-        codex.as_ref(),
+        architect_agent.as_ref(),
         AgentRole::Architect,
         "architect",
         &worktree,
@@ -97,7 +158,8 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     .await?;
     if !architecture_result.success {
         return Err(anyhow!(
-            "Codex architecture failed: {}",
+            "{} architecture failed: {}",
+            architect_agent.name(),
             architecture_result.stderr
         ));
     }
@@ -107,7 +169,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
 
     let implementation = run_agent(
         &ctx,
-        claude.as_ref(),
+        builder_agent.as_ref(),
         AgentRole::Implementer,
         "build",
         &worktree,
@@ -120,7 +182,8 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     .await?;
     if !implementation.success {
         return Err(anyhow!(
-            "Claude implementation failed: {}",
+            "{} implementation failed: {}",
+            builder_agent.name(),
             implementation.stderr
         ));
     }
@@ -129,7 +192,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     let mut verification_results = run_verification(&ctx, &worktree).await?;
     let (mut review, mut reviewed_patch_sha256) = perform_review_snapshot(
         &ctx,
-        codex.as_ref(),
+        reviewer_agent.as_ref(),
         &worktree,
         &base_sha,
         &architecture_json,
@@ -151,7 +214,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         let review_json = serde_json::to_string_pretty(&review)?;
         let repair = run_agent(
             &ctx,
-            claude.as_ref(),
+            repair_agent.as_ref(),
             AgentRole::Repair,
             &format!("repair-{round}"),
             &worktree,
@@ -166,7 +229,8 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         .await?;
         if !repair.success {
             return Err(anyhow!(
-                "Claude repair round {round} failed: {}",
+                "{} repair round {round} failed: {}",
+                repair_agent.name(),
                 repair.stderr
             ));
         }
@@ -181,7 +245,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         verification_results = run_verification(&ctx, &worktree).await?;
         (review, reviewed_patch_sha256) = perform_review_snapshot(
             &ctx,
-            codex.as_ref(),
+            reviewer_agent.as_ref(),
             &worktree,
             &base_sha,
             &architecture_json,
@@ -429,7 +493,7 @@ async fn run_verification<R: Runtime>(
 
 async fn perform_review_snapshot<R: Runtime>(
     ctx: &WorkflowContext<R>,
-    codex: &dyn Agent,
+    reviewer_agent: &dyn Agent,
     worktree: &Path,
     base_sha: &str,
     architecture: &str,
@@ -439,7 +503,7 @@ async fn perform_review_snapshot<R: Runtime>(
     let reviewed_patch_sha256 = git::patch_content_sha256(&full_diff);
     let review = perform_review(
         ctx,
-        codex,
+        reviewer_agent,
         worktree,
         architecture,
         verification_results,
@@ -456,7 +520,7 @@ async fn perform_review_snapshot<R: Runtime>(
 
 async fn perform_review<R: Runtime>(
     ctx: &WorkflowContext<R>,
-    codex: &dyn Agent,
+    reviewer_agent: &dyn Agent,
     worktree: &Path,
     architecture: &str,
     verification_results: &[VerificationResult],
@@ -472,7 +536,7 @@ async fn perform_review<R: Runtime>(
     };
     let result = run_agent(
         ctx,
-        codex,
+        reviewer_agent,
         AgentRole::Reviewer,
         "review",
         worktree,
@@ -485,7 +549,11 @@ async fn perform_review<R: Runtime>(
     )
     .await?;
     if !result.success {
-        return Err(anyhow!("Codex review failed: {}", result.stderr));
+        return Err(anyhow!(
+            "{} review failed: {}",
+            reviewer_agent.name(),
+            result.stderr
+        ));
     }
     let review = parse_review(&result.normalized_output)?;
     let review_json = serde_json::to_string_pretty(&review)?;
@@ -600,6 +668,12 @@ mod tests {
                 benchmark_command: None,
                 max_repairs: 3,
                 mock_agents: true,
+                agent_mode: "duet".into(),
+                execution_location: "local".into(),
+                codex_model: "gpt-5.6-sol".into(),
+                claude_model: "sonnet".into(),
+                codex_reasoning: "high".into(),
+                claude_reasoning: "high".into(),
             },
             cancel: CancellationToken::new(),
         })
@@ -685,6 +759,12 @@ mod tests {
                 benchmark_command: None,
                 max_repairs: 1,
                 mock_agents: true,
+                agent_mode: "duet".into(),
+                execution_location: "local".into(),
+                codex_model: "gpt-5.6-sol".into(),
+                claude_model: "sonnet".into(),
+                codex_reasoning: "high".into(),
+                claude_reasoning: "high".into(),
             },
             cancel: CancellationToken::new(),
         };
