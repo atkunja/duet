@@ -118,7 +118,7 @@ fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
             for key in ["result", "text", "output_text", "message"] {
                 if let Some(serde_json::Value::String(s)) = map.get(key) { if !s.is_empty() && !out.contains(s) { out.push(s.clone()); } }
             }
-            for value in map.values() { if value.is_array() { collect_strings(value, out); } }
+            for value in map.values() { if value.is_array() || value.is_object() { collect_strings(value, out); } }
         },
         serde_json::Value::Array(items) => for item in items { collect_strings(item, out); },
         _ => {}
