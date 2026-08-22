@@ -1,4 +1,5 @@
 mod agents;
+pub mod codex_app_server;
 mod commands;
 mod db;
 mod git;
@@ -21,6 +22,7 @@ use std::{
     time::Duration,
 };
 use tauri::Manager;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 pub struct AppState {
@@ -28,6 +30,7 @@ pub struct AppState {
     worktrees_root: std::path::PathBuf,
     active_runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     run_operations: Arc<Mutex<HashSet<String>>>,
+    codex_server: Arc<AsyncMutex<Option<codex_app_server::CodexAppServerClient>>>,
     _instance_lock: File,
 }
 
@@ -48,6 +51,7 @@ pub fn run() {
                 worktrees_root: data.join("worktrees"),
                 active_runs: Arc::new(Mutex::new(HashMap::new())),
                 run_operations: Arc::new(Mutex::new(HashSet::new())),
+                codex_server: Arc::new(AsyncMutex::new(None)),
                 _instance_lock: instance_lock,
             });
             Ok(())
@@ -55,7 +59,13 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                if !state.active_runs.lock().is_empty() || !state.run_operations.lock().is_empty() {
+                let codex_server_active = state.codex_server.try_lock().map_or(true, |server| {
+                    server.as_ref().is_some_and(|client| !client.is_closed())
+                });
+                if !state.active_runs.lock().is_empty()
+                    || !state.run_operations.lock().is_empty()
+                    || codex_server_active
+                {
                     api.prevent_close();
                     for token in state.active_runs.lock().values() {
                         token.cancel();
@@ -63,9 +73,13 @@ pub fn run() {
                     let window = window.clone();
                     let active = state.active_runs.clone();
                     let operations = state.run_operations.clone();
+                    let codex_server = state.codex_server.clone();
                     tauri::async_runtime::spawn(async move {
                         while !active.lock().is_empty() || !operations.lock().is_empty() {
                             tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        if let Some(client) = codex_server.lock().await.take() {
+                            let _ = client.shutdown().await;
                         }
                         let _ = window.destroy();
                     });
@@ -82,9 +96,11 @@ pub fn run() {
             commands::list_runs,
             commands::get_run,
             commands::get_diff,
+            commands::run_project_command,
             commands::apply_changes,
             commands::discard_run,
-            commands::doctor
+            commands::doctor,
+            commands::list_codex_models
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Duet");

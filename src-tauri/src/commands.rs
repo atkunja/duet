@@ -1,4 +1,7 @@
 use crate::{
+    codex_app_server::{
+        AppServerConfig, ClientInfo, CodexAppServerClient, ModelInfo, ModelListParams,
+    },
     git,
     models::{
         DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest,
@@ -6,6 +9,7 @@ use crate::{
     },
     process::{run_process, OutputCallback, ProcessRequest},
     tooling::resolve_binary,
+    verification::{self, VerificationItem},
     workflow::{self, WorkflowContext},
     AppState,
 };
@@ -22,6 +26,41 @@ use uuid::Uuid;
 type CommandResult<T> = Result<T, String>;
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+async fn codex_app_server(state: &State<'_, AppState>) -> CommandResult<CodexAppServerClient> {
+    let mut server = state.codex_server.lock().await;
+    if server.as_ref().is_some_and(CodexAppServerClient::is_closed) {
+        *server = None;
+    }
+    if let Some(client) = server.as_ref() {
+        return Ok(client.clone());
+    }
+    let binary = resolve_binary("codex").ok_or_else(|| "Codex CLI was not found".to_string())?;
+    let client = CodexAppServerClient::spawn(AppServerConfig::new(
+        binary,
+        ClientInfo::duet(env!("CARGO_PKG_VERSION")),
+    ))
+    .await
+    .map_err(err)?;
+    *server = Some(client.clone());
+    Ok(client)
+}
+
+#[tauri::command]
+pub async fn list_codex_models(state: State<'_, AppState>) -> CommandResult<Vec<ModelInfo>> {
+    codex_app_server(&state)
+        .await?
+        .list_models(ModelListParams::default())
+        .await
+        .map(|response| {
+            response
+                .data
+                .into_iter()
+                .filter(|model| !model.hidden)
+                .collect()
+        })
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -80,6 +119,12 @@ pub async fn start_run(
     }
     if request.test_command.trim().is_empty() {
         return Err("Configure a required test or build command before starting Duet".into());
+    }
+    if !matches!(request.agent_mode.as_str(), "duet" | "codex" | "claude") {
+        return Err("Choose Duet, Codex, or Claude as the agent mode".into());
+    }
+    if request.execution_location != "local" {
+        return Err("Cloud execution is not available yet; choose Local".into());
     }
     let project = state.db.get_project(&request.project_id).map_err(err)?;
     let inspection = git::inspect_repository(Path::new(&project.path))
@@ -161,6 +206,43 @@ pub fn list_runs(state: State<'_, AppState>) -> CommandResult<Vec<RunSummary>> {
 #[tauri::command]
 pub fn get_run(state: State<'_, AppState>, run_id: String) -> CommandResult<RunDetail> {
     state.db.get_run(&run_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn run_project_command(
+    state: State<'_, AppState>,
+    project_id: String,
+    command: String,
+) -> CommandResult<crate::models::VerificationResult> {
+    let command = command.trim().to_string();
+    if command.is_empty() {
+        return Err("enter a command to run".into());
+    }
+    let project = state.db.get_project(&project_id).map_err(err)?;
+    let operation_key = repository_operation_key(&project.path)?;
+    begin_operation(&state, &operation_key)?;
+    let token = CancellationToken::new();
+    let operation_id = format!("console:{}", Uuid::new_v4());
+    state
+        .active_runs
+        .lock()
+        .insert(operation_id.clone(), token.clone());
+    let result = verification::execute(
+        VerificationItem {
+            name: "Command console".into(),
+            command,
+            timeout: Duration::from_secs(10 * 60),
+            required: false,
+        },
+        Path::new(&project.path),
+        token,
+        Arc::new(|_: &str, _: &str| {}) as OutputCallback,
+    )
+    .await
+    .map_err(err);
+    state.active_runs.lock().remove(&operation_id);
+    state.run_operations.lock().remove(&operation_key);
+    result
 }
 
 #[tauri::command]
