@@ -38,7 +38,7 @@ impl Database {
                 status TEXT NOT NULL, current_stage TEXT NOT NULL DEFAULT 'queued',
                 base_sha TEXT NOT NULL, branch TEXT, worktree_path TEXT,
                 additions INTEGER NOT NULL DEFAULT 0, deletions INTEGER NOT NULL DEFAULT 0,
-                architecture TEXT, review TEXT, error TEXT,
+                architecture TEXT, review TEXT, error TEXT, verified_patch_sha256 TEXT,
                 created_at TEXT NOT NULL, completed_at TEXT, applied_at TEXT, discarded_at TEXT,
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             );
@@ -72,6 +72,7 @@ impl Database {
         let conn = self.connection.lock();
         ensure_column(&conn, "runs", "applied_at", "TEXT")?;
         ensure_column(&conn, "runs", "discarded_at", "TEXT")?;
+        ensure_column(&conn, "runs", "verified_patch_sha256", "TEXT")?;
         ensure_column(
             &conn,
             "stages",
@@ -184,6 +185,15 @@ impl Database {
         self.connection
             .lock()
             .execute("UPDATE runs SET review=?2 WHERE id=?1", params![id, output])?;
+        Ok(())
+    }
+
+    pub fn set_verified_patch_sha256(&self, id: &str, digest: &str) -> Result<()> {
+        let changed = self.connection.lock().execute(
+            "UPDATE runs SET verified_patch_sha256=?2 WHERE id=?1",
+            params![id, digest],
+        )?;
+        anyhow::ensure!(changed == 1, "run not found while recording verified patch");
         Ok(())
     }
 
@@ -318,8 +328,8 @@ impl Database {
 
     pub fn apply_info(&self, id: &str) -> Result<RunApplyInfo> {
         self.connection.lock().query_row(
-            "SELECT p.path,r.base_sha,r.worktree_path,r.branch,r.status,r.applied_at FROM runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1",
-            [id], |r| Ok(RunApplyInfo{repo_path:r.get(0)?,base_sha:r.get(1)?,worktree_path:r.get(2)?,branch:r.get(3)?,status:r.get(4)?,applied_at:r.get(5)?}),
+            "SELECT p.path,r.base_sha,r.worktree_path,r.branch,r.status,r.applied_at,r.verified_patch_sha256 FROM runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1",
+            [id], |r| Ok(RunApplyInfo{repo_path:r.get(0)?,base_sha:r.get(1)?,worktree_path:r.get(2)?,branch:r.get(3)?,status:r.get(4)?,applied_at:r.get(5)?,verified_patch_sha256:r.get(6)?}),
         ).context("run not found")
     }
 
@@ -348,6 +358,7 @@ pub struct RunApplyInfo {
     pub branch: Option<String>,
     pub status: String,
     pub applied_at: Option<String>,
+    pub verified_patch_sha256: Option<String>,
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
