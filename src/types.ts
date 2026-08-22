@@ -1,8 +1,8 @@
 export interface Project { id:string; name:string; path:string; language:string; buildSystem:string; testCommand:string; benchmarkCommand:string; lastUsedAt:string }
 export interface RepoInspection { path:string; branch:string; headSha:string; dirty:boolean; language:string; buildSystem:string; suggestedTestCommand:string }
 export interface StartRunRequest { projectId:string; task:string; testCommand:string; benchmarkCommand?:string; maxRepairs:number; mockAgents:boolean }
-export interface RunSummary { id:string; projectId:string; projectName:string; task:string; status:string; currentStage:string; createdAt:string; completedAt?:string; worktreePath?:string; additions:number; deletions:number }
-export interface StageRecord { id:number; runId:string; kind:string; agent:string; status:string; summary:string; rawOutput:string; startedAt:string; completedAt?:string; durationMs?:number }
+export interface RunSummary { id:string; projectId:string; projectName:string; task:string; status:string; currentStage:string; createdAt:string; completedAt?:string; worktreePath?:string; additions:number; deletions:number; appliedAt?:string; discardedAt?:string; error?:string }
+export interface StageRecord { id:number; runId:string; kind:string; agent:string; status:string; summary:string; rawOutput:string; normalizedOutput:string; startedAt:string; completedAt?:string; durationMs?:number }
 export interface ChangedFile { path:string; status:string; additions:number; deletions:number }
 export interface VerificationResult { name:string; command:string; success:boolean; exitCode?:number; stdout:string; stderr:string; durationMs:number; required:boolean }
 export interface RunDetail extends RunSummary { stages:StageRecord[]; architecture?:string; review?:string; verification:VerificationResult[]; changedFiles:ChangedFile[] }
@@ -22,3 +22,4 @@ export type RunEvent =
   | {type:"runCancelled";runId:string};
 
 export type DetailTab = "summary"|"activity"|"files"|"diff"|"tests"|"review"|"logs";
+export interface LiveLog { text:string; receivedAt:string }

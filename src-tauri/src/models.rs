@@ -51,6 +51,9 @@ pub struct RunSummary {
     pub worktree_path: Option<String>,
     pub additions: i64,
     pub deletions: i64,
+    pub applied_at: Option<String>,
+    pub discarded_at: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +66,7 @@ pub struct StageRecord {
     pub status: String,
     pub summary: String,
     pub raw_output: String,
+    pub normalized_output: String,
     pub started_at: String,
     pub completed_at: Option<String>,
     pub duration_ms: Option<i64>,
@@ -111,6 +115,7 @@ pub struct ReviewIssue {
     pub line: Option<u32>,
     pub problem: String,
     pub reason: String,
+    #[serde(alias = "suggested_fix")]
     pub suggested_fix: String,
 }
 
@@ -128,15 +133,15 @@ pub struct ReviewResult {
 pub struct ArchitecturePlan {
     pub goal: String,
     pub summary: String,
-    #[serde(default)]
+    #[serde(default, alias = "files_to_modify")]
     pub files_to_modify: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "files_to_add")]
     pub files_to_add: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "implementation_steps")]
     pub implementation_steps: Vec<String>,
     #[serde(default)]
     pub risks: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "tests_required")]
     pub tests_required: Vec<String>,
 }
 
@@ -164,14 +169,49 @@ pub struct ToolStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum RunEvent {
-    RunStarted { run_id: String, task: String },
-    StageStarted { run_id: String, stage: String, agent: String },
-    AgentOutput { run_id: String, stage: String, stream: String, line: String },
-    StageCompleted { run_id: String, stage: String, success: bool, summary: String },
-    FileChanged { run_id: String, path: String },
-    VerificationCompleted { run_id: String, result: VerificationResult },
-    ReviewCompleted { run_id: String, verdict: String, issues: usize },
-    RunCompleted { run_id: String, verified: bool },
-    RunFailed { run_id: String, reason: String },
-    RunCancelled { run_id: String },
+    RunStarted {
+        run_id: String,
+        task: String,
+    },
+    StageStarted {
+        run_id: String,
+        stage: String,
+        agent: String,
+    },
+    AgentOutput {
+        run_id: String,
+        stage: String,
+        stream: String,
+        line: String,
+    },
+    StageCompleted {
+        run_id: String,
+        stage: String,
+        success: bool,
+        summary: String,
+    },
+    FileChanged {
+        run_id: String,
+        path: String,
+    },
+    VerificationCompleted {
+        run_id: String,
+        result: VerificationResult,
+    },
+    ReviewCompleted {
+        run_id: String,
+        verdict: String,
+        issues: usize,
+    },
+    RunCompleted {
+        run_id: String,
+        verified: bool,
+    },
+    RunFailed {
+        run_id: String,
+        reason: String,
+    },
+    RunCancelled {
+        run_id: String,
+    },
 }
