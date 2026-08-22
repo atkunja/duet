@@ -1,0 +1,10 @@
+[project]
+test = "cargo test"
+benchmark = "cargo bench"
+
+[workflow]
+max_repairs = 3
+
+[verification]
+lint = "cargo clippy --all-targets -- -D warnings"
+typecheck = "cargo check"
