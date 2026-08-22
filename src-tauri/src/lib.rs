@@ -11,9 +11,12 @@ mod verification;
 mod workflow;
 
 use db::Database;
+use fs2::FileExt;
 use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
+    fs::{File, OpenOptions},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -25,6 +28,7 @@ pub struct AppState {
     worktrees_root: std::path::PathBuf,
     active_runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     run_operations: Arc<Mutex<HashSet<String>>>,
+    _instance_lock: File,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -36,6 +40,7 @@ pub fn run() {
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data)?;
+            let instance_lock = acquire_instance_lock(&data)?;
             let db = Arc::new(Database::open(&data.join("duet.sqlite3"))?);
             db.interrupt_active_runs()?;
             app.manage(AppState {
@@ -43,6 +48,7 @@ pub fn run() {
                 worktrees_root: data.join("worktrees"),
                 active_runs: Arc::new(Mutex::new(HashMap::new())),
                 run_operations: Arc::new(Mutex::new(HashSet::new())),
+                _instance_lock: instance_lock,
             });
             Ok(())
         })
@@ -82,4 +88,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Duet");
+}
+
+fn acquire_instance_lock(data: &Path) -> anyhow::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(data.join("duet.lock"))?;
+    FileExt::try_lock_exclusive(&file).map_err(|_| {
+        anyhow::anyhow!("Duet is already running. Use the existing window to manage active runs.")
+    })?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_instance_can_own_the_data_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let _owner = acquire_instance_lock(directory.path()).unwrap();
+        assert!(acquire_instance_lock(directory.path()).is_err());
+    }
 }
