@@ -1,6 +1,6 @@
 use crate::{
     agents::{parse_architecture, parse_review, Agent, AgentRequest, AgentRole, ClaudeAgent, CodexAgent, MockAgent},
-    db::Database, git, graph, models::{RunEvent, StartRunRequest, VerificationResult}, prompts,
+    db::Database, git, graph::{self, TaskStatus}, models::{RunEvent, StartRunRequest, VerificationResult}, prompts,
     process::OutputCallback, verification::{self, VerificationItem},
 };
 use anyhow::{anyhow, Context, Result};
@@ -19,10 +19,13 @@ pub struct WorkflowContext {
 }
 
 pub async fn execute(ctx: WorkflowContext) -> Result<()> {
-    let _graph = graph::default_workflow();
+    let mut task_graph = graph::default_workflow();
+    task_graph.validate()?;
     let project = ctx.db.get_project(&ctx.request.project_id)?;
     let repo = PathBuf::from(&project.path);
     let inspection = git::inspect_repository(&repo).await?;
+    task_graph.set_status("inspect", TaskStatus::Completed)?;
+    let _ready_nodes = task_graph.ready();
     emit(&ctx, RunEvent::RunStarted { run_id:ctx.run_id.clone(), task:ctx.request.task.clone() });
 
     ctx.db.set_run_stage(&ctx.run_id, "preparing")?;
@@ -81,7 +84,8 @@ async fn run_agent(ctx:&WorkflowContext, agent:&dyn Agent, role:AgentRole, stage
     let result = agent.execute(AgentRequest{role,prompt,worktree:worktree.into(),timeout:Duration::from_secs(60*45),callback},ctx.cancel.clone()).await;
     match result {
         Ok(result) => {
-            ctx.db.finish_stage(stage_id,result.success,if result.success{"Completed"}else{"Agent exited unsuccessfully"},&format!("{}\n{}",result.raw_output,result.stderr),result.duration_ms)?;
+            let summary=if result.success{"Completed".to_string()}else{format!("Agent exited with status {:?}",result.exit_code)};
+            ctx.db.finish_stage(stage_id,result.success,&summary,&format!("{}\n{}",result.raw_output,result.stderr),result.duration_ms)?;
             emit(ctx,RunEvent::StageCompleted{run_id:ctx.run_id.clone(),stage:stage.into(),success:result.success,summary:if result.success{"Completed".into()}else{"Agent failed".into()}});
             Ok(result)
         },
@@ -91,18 +95,20 @@ async fn run_agent(ctx:&WorkflowContext, agent:&dyn Agent, role:AgentRole, stage
 
 async fn run_verification(ctx:&WorkflowContext, worktree:&Path) -> Result<Vec<VerificationResult>> {
     ctx.db.set_run_stage(&ctx.run_id,"verify")?;
+    let stage_id=ctx.db.start_stage(&ctx.run_id,"verify","Duet")?;
     emit(ctx,RunEvent::StageStarted{run_id:ctx.run_id.clone(),stage:"verify".into(),agent:"Duet".into()});
     let mut items=Vec::new();
     if !ctx.request.test_command.trim().is_empty() { items.push(VerificationItem{name:"Tests".into(),command:ctx.request.test_command.clone(),timeout:Duration::from_secs(20*60),required:true}); }
     if let Some(command)=ctx.request.benchmark_command.as_ref().filter(|s|!s.trim().is_empty()) { items.push(VerificationItem{name:"Benchmark".into(),command:command.clone(),timeout:Duration::from_secs(30*60),required:false}); }
     if items.is_empty() {
         let result=VerificationResult{name:"Tests".into(),command:"Not configured".into(),success:true,exit_code:None,stdout:"No test command configured; review remains required.".into(),stderr:String::new(),duration_ms:0,required:false};
-        ctx.db.add_verification(&ctx.run_id,&result)?; emit(ctx,RunEvent::VerificationCompleted{run_id:ctx.run_id.clone(),result:result.clone()}); return Ok(vec![result]);
+        ctx.db.add_verification(&ctx.run_id,&result)?; ctx.db.finish_stage(stage_id,true,"No required command configured",&result.stdout,0)?; emit(ctx,RunEvent::VerificationCompleted{run_id:ctx.run_id.clone(),result:result.clone()}); return Ok(vec![result]);
     }
     let futures=items.into_iter().map(|item| verification::execute(item,worktree,ctx.cancel.clone(),output_callback(ctx,"verify")));
     let mut results=Vec::new();
     for result in join_all(futures).await { let result=result?; ctx.db.add_verification(&ctx.run_id,&result)?; emit(ctx,RunEvent::VerificationCompleted{run_id:ctx.run_id.clone(),result:result.clone()}); results.push(result); }
-    emit(ctx,RunEvent::StageCompleted{run_id:ctx.run_id.clone(),stage:"verify".into(),success:required_checks_pass(&results),summary:verification::summarize(&results)});
+    let summary=verification::summarize(&results);ctx.db.finish_stage(stage_id,required_checks_pass(&results),&summary,&summary,results.iter().map(|r|r.duration_ms).max().unwrap_or(0))?;
+    emit(ctx,RunEvent::StageCompleted{run_id:ctx.run_id.clone(),stage:"verify".into(),success:required_checks_pass(&results),summary});
     Ok(results)
 }
 
