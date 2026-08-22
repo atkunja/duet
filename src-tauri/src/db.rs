@@ -202,6 +202,13 @@ impl Database {
     pub fn worktree_for_run(&self, id: &str) -> Result<Option<String>> {
         Ok(self.connection.lock().query_row("SELECT worktree_path FROM runs WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten())
     }
+
+    pub fn apply_info(&self, id: &str) -> Result<(String, String, String, Option<String>)> {
+        self.connection.lock().query_row(
+            "SELECT p.path,r.base_sha,r.worktree_path,r.branch FROM runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1",
+            [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        ).context("run not found")
+    }
 }
 
 fn map_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
