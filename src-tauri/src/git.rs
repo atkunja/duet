@@ -9,6 +9,12 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
 }
 
+#[cfg(test)]
+pub mod tests_support{
+    use super::*;
+    pub async fn init_repo(path:&Path){git(path,&["init"]).await.unwrap();git(path,&["config","user.email","duet@example.test"]).await.unwrap();git(path,&["config","user.name","Duet Test"]).await.unwrap();std::fs::write(path.join("README.md"),"base\n").unwrap();git(path,&["add","README.md"]).await.unwrap();git(path,&["commit","-m","base"]).await.unwrap();}
+}
+
 pub async fn inspect_repository(path: &Path) -> Result<RepoInspection> {
     let canonical = path.canonicalize().context("repository path does not exist")?;
     let inside = git(&canonical, &["rev-parse", "--is-inside-work-tree"]).await?;
@@ -96,8 +102,7 @@ mod tests {
     #[tokio::test]
     async fn isolates_and_explicitly_applies_a_patch() {
         let source=tempfile::tempdir().unwrap();
-        git(source.path(),&["init"]).await.unwrap();git(source.path(),&["config","user.email","duet@example.test"]).await.unwrap();git(source.path(),&["config","user.name","Duet Test"]).await.unwrap();
-        std::fs::write(source.path().join("README.md"),"base\n").unwrap();git(source.path(),&["add","README.md"]).await.unwrap();git(source.path(),&["commit","-m","base"]).await.unwrap();
+        tests_support::init_repo(source.path()).await;
         let base=git(source.path(),&["rev-parse","HEAD"]).await.unwrap();let managed=tempfile::tempdir().unwrap();let (worktree,_)=create_worktree(source.path(),managed.path(),"12345678-test",&base).await.unwrap();
         std::fs::write(worktree.join("feature.txt"),"isolated\n").unwrap();
         assert!(!source.path().join("feature.txt").exists());assert!(changed_files(&worktree).await.unwrap().iter().any(|f|f.path=="feature.txt"));
