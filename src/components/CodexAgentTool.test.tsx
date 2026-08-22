@@ -121,4 +121,22 @@ describe("CodexAgentTool", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send to Codex" }));
     await waitFor(() => expect(api.startCodexThread).toHaveBeenCalledTimes(2));
   });
+
+  it("starts a fresh thread when setup is retried after a generation error", async () => {
+    vi.mocked(api.startCodexTurn)
+      .mockRejectedValueOnce(new Error("Codex restarted"))
+      .mockResolvedValue({ id: "turn-2", status: "inProgress", items: [] });
+    render(<CodexAgentTool project={project}/>);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Assistant model" })).toHaveValue("sol"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Codex" }), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to Codex" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Codex restarted"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(listen).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Codex" }), { target: { value: "Second" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to Codex" }));
+
+    await waitFor(() => expect(api.startCodexThread).toHaveBeenCalledTimes(2));
+  });
 });

@@ -170,6 +170,7 @@ struct RuntimeState {
     history_capacity: usize,
     history: VecDeque<SequencedRuntimeEvent>,
     pending: HashMap<RuntimeRequestToken, PendingServerRequest>,
+    terminal: bool,
 }
 
 impl RuntimeState {
@@ -179,10 +180,14 @@ impl RuntimeState {
             history_capacity,
             history: VecDeque::with_capacity(history_capacity),
             pending: HashMap::new(),
+            terminal: false,
         }
     }
 
-    fn record(&mut self, event: CodexRuntimeEvent) -> SequencedRuntimeEvent {
+    fn record(&mut self, event: CodexRuntimeEvent) -> Option<SequencedRuntimeEvent> {
+        if self.terminal {
+            return None;
+        }
         let envelope = SequencedRuntimeEvent {
             sequence: self.next_sequence,
             event,
@@ -192,7 +197,13 @@ impl RuntimeState {
             self.history.pop_front();
         }
         self.history.push_back(envelope.clone());
-        envelope
+        Some(envelope)
+    }
+
+    fn close(&mut self) -> Option<SequencedRuntimeEvent> {
+        let event = self.record(CodexRuntimeEvent::Closed)?;
+        self.terminal = true;
+        Some(event)
     }
 }
 
@@ -217,6 +228,8 @@ struct RuntimeInner {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     automatic_errors: mpsc::Sender<AutomaticErrorResponse>,
     shutdown_timeout: Duration,
+    notification_drained: CancellationToken,
+    request_drained: CancellationToken,
 }
 
 impl Drop for RuntimeInner {
@@ -250,6 +263,8 @@ impl CodexRuntime {
             mpsc::channel(config.automatic_response_capacity);
         let deadline_changed = Arc::new(Notify::new());
         let stop = CancellationToken::new();
+        let notification_drained = CancellationToken::new();
+        let request_drained = CancellationToken::new();
         let closed_event_sent = Arc::new(AtomicBool::new(false));
 
         let inner = Arc::new(RuntimeInner {
@@ -265,6 +280,8 @@ impl CodexRuntime {
             tasks: Mutex::new(Vec::new()),
             automatic_errors,
             shutdown_timeout: config.shutdown_timeout,
+            notification_drained: notification_drained.clone(),
+            request_drained: request_drained.clone(),
         });
 
         let tasks = vec![
@@ -274,6 +291,7 @@ impl CodexRuntime {
                 inner.events.clone(),
                 inner.deadline_changed.clone(),
                 inner.stop.clone(),
+                notification_drained,
             )),
             tokio::spawn(server_request_pump(
                 server_requests,
@@ -286,6 +304,7 @@ impl CodexRuntime {
                     stop: inner.stop.clone(),
                     closed_event_sent: inner.closed_event_sent.clone(),
                     request_timeout: server_request_timeout,
+                    drained: request_drained,
                 },
             )),
             tokio::spawn(expiration_pump(ExpirationPumpContext {
@@ -308,13 +327,16 @@ impl CodexRuntime {
                     response_timeout: config.shutdown_timeout,
                 },
             )),
-            tokio::spawn(connection_monitor(
-                inner.client.clone(),
-                inner.state.clone(),
-                inner.events.clone(),
-                inner.closed_event_sent.clone(),
-                inner.stop.clone(),
-            )),
+            tokio::spawn(connection_monitor(ConnectionMonitorContext {
+                client: inner.client.clone(),
+                state: inner.state.clone(),
+                events: inner.events.clone(),
+                closed_event_sent: inner.closed_event_sent.clone(),
+                stop: inner.stop.clone(),
+                notification_drained: inner.notification_drained.clone(),
+                request_drained: inner.request_drained.clone(),
+                shutdown_timeout: inner.shutdown_timeout,
+            })),
         ];
         *inner.tasks.lock().await = tasks;
         Ok(Self { inner })
@@ -325,9 +347,7 @@ impl CodexRuntime {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.inner.stop.is_cancelled()
-            || self.inner.shutdown_started.load(Ordering::Acquire)
-            || self.inner.client.is_closed()
+        self.inner.closed_event_sent.load(Ordering::Acquire)
     }
 
     /// Subscribe to runtime events with a bounded replay window.
@@ -580,6 +600,7 @@ struct RequestPumpContext {
     stop: CancellationToken,
     closed_event_sent: Arc<AtomicBool>,
     request_timeout: Duration,
+    drained: CancellationToken,
 }
 
 struct ExpirationPumpContext {
@@ -601,12 +622,24 @@ struct AutomaticResponseContext {
     response_timeout: Duration,
 }
 
+struct ConnectionMonitorContext {
+    client: CodexAppServerClient,
+    state: Arc<Mutex<RuntimeState>>,
+    events: broadcast::Sender<SequencedRuntimeEvent>,
+    closed_event_sent: Arc<AtomicBool>,
+    stop: CancellationToken,
+    notification_drained: CancellationToken,
+    request_drained: CancellationToken,
+    shutdown_timeout: Duration,
+}
+
 async fn notification_pump(
     mut receiver: broadcast::Receiver<ServerNotification>,
     state: Arc<Mutex<RuntimeState>>,
     events: broadcast::Sender<SequencedRuntimeEvent>,
     deadline_changed: Arc<Notify>,
     stop: CancellationToken,
+    drained: CancellationToken,
 ) {
     loop {
         tokio::select! {
@@ -640,6 +673,7 @@ async fn notification_pump(
             }
         }
     }
+    drained.cancel();
 }
 
 async fn clear_server_resolved_request(
@@ -660,10 +694,12 @@ async fn clear_server_resolved_request(
         return;
     };
     state.pending.remove(&token);
-    let event = state.record(CodexRuntimeEvent::ServerRequestResolved {
+    let Some(event) = state.record(CodexRuntimeEvent::ServerRequestResolved {
         token,
         resolution: RuntimeRequestResolution::ClearedByServer,
-    });
+    }) else {
+        return;
+    };
     let _ = events.send(event);
     drop(state);
     deadline_changed.notify_one();
@@ -700,6 +736,7 @@ async fn server_request_pump(
             }
         }
     }
+    context.drained.cancel();
 }
 
 async fn handle_server_request(request: ServerRequest, context: &RequestPumpContext) {
@@ -741,11 +778,13 @@ async fn handle_server_request(request: ServerRequest, context: &RequestPumpCont
             break candidate;
         }
     };
-    let event = state.record(CodexRuntimeEvent::ServerRequest {
+    let Some(event) = state.record(CodexRuntimeEvent::ServerRequest {
         token: token.clone(),
         method: request.method.clone(),
         params: request.params,
-    });
+    }) else {
+        return;
+    };
     state.pending.insert(
         token,
         PendingServerRequest {
@@ -894,21 +933,27 @@ async fn automatic_response_pump(
     }
 }
 
-async fn connection_monitor(
-    client: CodexAppServerClient,
-    state: Arc<Mutex<RuntimeState>>,
-    events: broadcast::Sender<SequencedRuntimeEvent>,
-    closed_event_sent: Arc<AtomicBool>,
-    stop: CancellationToken,
-) {
+async fn connection_monitor(context: ConnectionMonitorContext) {
     loop {
         tokio::select! {
             biased;
-            _ = stop.cancelled() => break,
+            _ = context.stop.cancelled() => break,
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                if client.is_closed() {
-                    publish_closed_once(&state, &events, &closed_event_sent).await;
-                    stop.cancel();
+                if context.client.is_closed() {
+                    let _ = timeout(context.shutdown_timeout, async {
+                        tokio::join!(
+                            context.notification_drained.cancelled(),
+                            context.request_drained.cancelled()
+                        );
+                    }).await;
+                    context.stop.cancel();
+                    let _ = context.client.shutdown().await;
+                    resolve_pending_for_shutdown(&context.state, &context.events).await;
+                    publish_closed_once(
+                        &context.state,
+                        &context.events,
+                        &context.closed_event_sent,
+                    ).await;
                     break;
                 }
             }
@@ -925,6 +970,14 @@ async fn terminate_after_fatal(
 ) {
     stop.cancel();
     let _ = client.shutdown().await;
+    resolve_pending_for_shutdown(state, events).await;
+    publish_closed_once(state, events, closed_event_sent).await;
+}
+
+async fn resolve_pending_for_shutdown(
+    state: &Mutex<RuntimeState>,
+    events: &broadcast::Sender<SequencedRuntimeEvent>,
+) {
     let pending = {
         let mut state = state.lock().await;
         std::mem::take(&mut state.pending)
@@ -940,7 +993,6 @@ async fn terminate_after_fatal(
         )
         .await;
     }
-    publish_closed_once(state, events, closed_event_sent).await;
 }
 
 async fn publish_event(
@@ -949,7 +1001,9 @@ async fn publish_event(
     event: CodexRuntimeEvent,
 ) {
     let mut state = state.lock().await;
-    let event = state.record(event);
+    let Some(event) = state.record(event) else {
+        return;
+    };
     // Sending while holding the state lock makes subscribe_events atomic with
     // respect to its replay snapshot and live subscription.
     let _ = events.send(event);
@@ -960,8 +1014,12 @@ async fn publish_closed_once(
     events: &broadcast::Sender<SequencedRuntimeEvent>,
     closed_event_sent: &AtomicBool,
 ) {
-    if !closed_event_sent.swap(true, Ordering::AcqRel) {
-        publish_event(state, events, CodexRuntimeEvent::Closed).await;
+    let mut state = state.lock().await;
+    if let Some(event) = state.close() {
+        let _ = events.send(event);
+        // Replacement is allowed only after subscribers can observe the
+        // terminal envelope. The state lock serializes concurrent finalizers.
+        closed_event_sent.store(true, Ordering::Release);
     }
 }
 
@@ -1287,5 +1345,46 @@ printf '%s\n' '{"id":"pending-close","method":"item/fileChange/requestApproval",
             .status()
             .is_ok_and(|status| status.success());
         assert!(!alive, "fake app-server process {pid} survived shutdown");
+    }
+
+    #[tokio::test]
+    async fn natural_exit_drains_terminal_notifications_before_closed() {
+        let script = format!(
+            "{HANDSHAKE}{}",
+            r#"
+read_line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thr_exit","ephemeral":false}}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_exit","turn":{"id":"turn_exit","status":"completed"}}}'
+exit 0
+"#
+        );
+        let fake = fake_runtime(&script, Duration::from_secs(1)).await;
+        let mut events = fake.runtime.subscribe_events().await;
+        let thread = fake
+            .runtime
+            .start_thread(ThreadStartParams::default())
+            .await
+            .unwrap();
+        assert_eq!(thread.thread.id, "thr_exit");
+
+        let mut saw_completion = false;
+        loop {
+            let event = timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event.event {
+                CodexRuntimeEvent::Notification { method, .. } if method == "turn/completed" => {
+                    saw_completion = true;
+                }
+                CodexRuntimeEvent::Closed => break,
+                _ => {}
+            }
+        }
+        assert!(saw_completion, "turn completion must precede Closed");
+        assert!(fake.runtime.is_closed());
+        assert!(timeout(Duration::from_millis(20), events.recv())
+            .await
+            .is_err());
     }
 }

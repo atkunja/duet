@@ -16,7 +16,7 @@ use crate::{
     tooling::resolve_binary,
     verification::{self, VerificationItem},
     workflow::{self, WorkflowContext},
-    AppState, CodexThreadOwner,
+    AppState, CodexThreadOwner, ManagedCodexRuntime,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -39,14 +39,11 @@ fn err(error: impl std::fmt::Display) -> String {
 async fn codex_runtime(
     app: &AppHandle,
     state: &State<'_, AppState>,
-) -> CommandResult<CodexRuntime> {
+) -> CommandResult<ManagedCodexRuntime> {
     let mut server = state.codex_server.lock().await;
-    if server.as_ref().is_some_and(CodexRuntime::is_closed) {
-        *server = None;
-        state.codex_threads.lock().clear();
-    }
-    if let Some(client) = server.as_ref() {
-        return Ok(client.clone());
+    retire_closed_codex_runtime(app, state, &mut server);
+    if let Some(managed) = server.as_ref() {
+        return Ok(managed.clone());
     }
     let binary = resolve_binary("codex").ok_or_else(|| "Codex CLI was not found".to_string())?;
     let runtime = CodexRuntime::spawn(CodexRuntimeConfig::new(AppServerConfig::new(
@@ -55,9 +52,19 @@ async fn codex_runtime(
     )))
     .await
     .map_err(err)?;
+    let generation = {
+        let mut current = state.codex_generation.lock();
+        *current = current.saturating_add(1);
+        *current
+    };
+    let managed = ManagedCodexRuntime {
+        runtime: runtime.clone(),
+        generation,
+    };
     let event_app = app.clone();
     let event_runtime = runtime.clone();
     let thread_owners = state.codex_threads.clone();
+    let active_generation = state.codex_generation.clone();
     tauri::async_runtime::spawn(async move {
         let mut last_sequence = 0;
         loop {
@@ -66,17 +73,26 @@ async fn codex_runtime(
                 match events.recv().await {
                     Ok(event) if event.sequence <= last_sequence => continue,
                     Ok(event) => {
+                        if *active_generation.lock() != generation {
+                            return;
+                        }
                         if sequence_has_gap(last_sequence, event.sequence) {
-                            thread_owners.lock().clear();
-                            let _ = event_app.emit(
-                                "duet://codex-event",
-                                SequencedRuntimeEvent {
-                                    sequence: event.sequence,
-                                    event: CodexRuntimeEvent::FatalProtocolError {
-                                        message: "Codex event history was incomplete; the session was reset to avoid showing stale state".into(),
+                            clear_codex_thread_generation(&thread_owners, generation);
+                            {
+                                let current = active_generation.lock();
+                                if *current != generation {
+                                    return;
+                                }
+                                let _ = event_app.emit(
+                                    "duet://codex-event",
+                                    SequencedRuntimeEvent {
+                                        sequence: event.sequence,
+                                        event: CodexRuntimeEvent::FatalProtocolError {
+                                            message: "Codex event history was incomplete; the session was reset to avoid showing stale state".into(),
+                                        },
                                     },
-                                },
-                            );
+                                );
+                            }
                             last_sequence = event.sequence;
                             let _ = event_runtime.shutdown().await;
                             continue;
@@ -95,28 +111,42 @@ async fn codex_runtime(
                                 {
                                     Ok(()) | Err(CodexRuntimeError::UnknownRequestToken) => {}
                                     Err(error) => {
-                                        thread_owners.lock().clear();
-                                        let _ = event_app.emit(
-                                            "duet://codex-event",
-                                            SequencedRuntimeEvent {
-                                                sequence: event.sequence,
-                                                event: CodexRuntimeEvent::FatalProtocolError {
-                                                    message: format!(
-                                                        "Codex request rejection failed: {error}"
-                                                    ),
+                                        clear_codex_thread_generation(&thread_owners, generation);
+                                        {
+                                            let current = active_generation.lock();
+                                            if *current != generation {
+                                                return;
+                                            }
+                                            let _ = event_app.emit(
+                                                "duet://codex-event",
+                                                SequencedRuntimeEvent {
+                                                    sequence: event.sequence,
+                                                    event: CodexRuntimeEvent::FatalProtocolError {
+                                                        message: format!(
+                                                            "Codex request rejection failed: {error}"
+                                                        ),
+                                                    },
                                                 },
-                                            },
-                                        );
+                                            );
+                                        }
                                         let _ = event_runtime.shutdown().await;
                                     }
                                 }
                             }
                             CodexRuntimeEvent::Closed => {
-                                thread_owners.lock().clear();
+                                let current = active_generation.lock();
+                                if *current != generation {
+                                    return;
+                                }
+                                clear_codex_thread_generation(&thread_owners, generation);
                                 let _ = event_app.emit("duet://codex-event", event);
                                 return;
                             }
                             _ => {
+                                let current = active_generation.lock();
+                                if *current != generation {
+                                    return;
+                                }
                                 let _ = event_app.emit("duet://codex-event", event);
                             }
                         }
@@ -128,8 +158,41 @@ async fn codex_runtime(
             }
         }
     });
-    *server = Some(runtime.clone());
-    Ok(runtime)
+    *server = Some(managed.clone());
+    Ok(managed)
+}
+
+fn retire_closed_codex_runtime(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    server: &mut Option<ManagedCodexRuntime>,
+) {
+    if !server
+        .as_ref()
+        .is_some_and(|managed| managed.runtime.is_closed())
+    {
+        return;
+    }
+    *server = None;
+    state.codex_threads.lock().clear();
+    // Runtime forwarding is asynchronous. Emit the reset synchronously before
+    // a replacement can be returned so a mounted panel cannot retain an old ID.
+    let _ = app.emit(
+        "duet://codex-event",
+        SequencedRuntimeEvent {
+            sequence: 0,
+            event: CodexRuntimeEvent::Closed,
+        },
+    );
+}
+
+fn clear_codex_thread_generation(
+    thread_owners: &parking_lot::Mutex<std::collections::HashMap<String, CodexThreadOwner>>,
+    generation: u64,
+) {
+    thread_owners
+        .lock()
+        .retain(|_, owner| owner.generation != generation);
 }
 
 fn sequence_has_gap(previous: u64, next: u64) -> bool {
@@ -142,17 +205,14 @@ pub async fn list_codex_models(
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<ModelInfo>> {
     let client = codex_runtime(&app, &state).await?;
-    match collect_codex_models(&client).await {
+    match collect_codex_models(&client.runtime).await {
         Ok(models) => Ok(models),
         Err(CodexRuntimeError::AppServer(AppServerError::ConnectionClosed { .. })) => {
             let mut server = state.codex_server.lock().await;
-            if server.as_ref().is_some_and(CodexRuntime::is_closed) {
-                *server = None;
-                state.codex_threads.lock().clear();
-            }
+            retire_closed_codex_runtime(&app, &state, &mut server);
             drop(server);
             let retry = codex_runtime(&app, &state).await?;
-            collect_codex_models(&retry).await.map_err(err)
+            collect_codex_models(&retry.runtime).await.map_err(err)
         }
         Err(error) => Err(err(error)),
     }
@@ -198,8 +258,9 @@ pub async fn start_codex_thread(
 ) -> CommandResult<crate::codex_app_server::ThreadInfo> {
     let project = state.db.get_project(&project_id).map_err(err)?;
     let cwd = canonical_path(&project.path)?;
-    let response = codex_runtime(&app, &state)
-        .await?
+    let managed = codex_runtime(&app, &state).await?;
+    let response = managed
+        .runtime
         .start_thread(ThreadStartParams {
             model: Some(model),
             cwd: Some(cwd.clone()),
@@ -212,9 +273,16 @@ pub async fn start_codex_thread(
         })
         .await
         .map_err(err)?;
+    if managed.generation != *state.codex_generation.lock() || managed.runtime.is_closed() {
+        return Err("Codex restarted before the thread was ready; retry the message".into());
+    }
     state.codex_threads.lock().insert(
         response.thread.id.clone(),
-        CodexThreadOwner { project_id, cwd },
+        CodexThreadOwner {
+            project_id,
+            cwd,
+            generation: managed.generation,
+        },
     );
     Ok(response.thread)
 }
@@ -240,7 +308,10 @@ pub async fn start_codex_turn(
         .get(&thread_id)
         .cloned()
         .ok_or_else(|| "Codex thread is not owned by this Duet session".to_string())?;
-    if owner.project_id != project_id || owner.cwd != project_cwd {
+    if owner.project_id != project_id
+        || owner.cwd != project_cwd
+        || owner.generation != *state.codex_generation.lock()
+    {
         return Err("Codex thread does not belong to this project".into());
     }
     let mut params = TurnStartParams::text(thread_id, prompt.trim());
@@ -252,8 +323,10 @@ pub async fn start_codex_turn(
     }));
     params.model = Some(model);
     params.effort = Some(effort);
-    codex_runtime(&app, &state)
-        .await?
+    let managed = codex_runtime(&app, &state).await?;
+    ensure_codex_generation(owner.generation, managed.generation)?;
+    managed
+        .runtime
         .start_turn(params)
         .await
         .map(|response| response.turn)
@@ -274,14 +347,24 @@ pub async fn interrupt_codex_turn(
         .get(&thread_id)
         .cloned()
         .ok_or_else(|| "Codex thread is not owned by this Duet session".to_string())?;
-    if owner.project_id != project_id {
+    if owner.project_id != project_id || owner.generation != *state.codex_generation.lock() {
         return Err("Codex thread does not belong to this project".into());
     }
-    codex_runtime(&app, &state)
-        .await?
+    let managed = codex_runtime(&app, &state).await?;
+    ensure_codex_generation(owner.generation, managed.generation)?;
+    managed
+        .runtime
         .interrupt_turn(&thread_id, &turn_id)
         .await
         .map_err(err)
+}
+
+fn ensure_codex_generation(owner_generation: u64, runtime_generation: u64) -> CommandResult<()> {
+    if owner_generation == runtime_generation {
+        Ok(())
+    } else {
+        Err("Codex restarted; start a new repository thread and retry".into())
+    }
 }
 
 fn canonical_path(path: &str) -> CommandResult<String> {
@@ -907,7 +990,12 @@ async fn bounded_tool_output(path: &Path, args: &[&str]) -> Option<(bool, String
 
 #[cfg(test)]
 mod tests {
-    use super::{sequence_has_gap, validate_preferences, AppPreferences};
+    use super::{
+        clear_codex_thread_generation, ensure_codex_generation, sequence_has_gap,
+        validate_preferences, AppPreferences, CodexThreadOwner,
+    };
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
 
     #[test]
     fn detects_only_missing_runtime_events() {
@@ -934,5 +1022,39 @@ mod tests {
             max_repairs: 0,
         })
         .is_err());
+    }
+
+    #[test]
+    fn stale_runtime_cleanup_preserves_replacement_thread_owners() {
+        let owners = Mutex::new(HashMap::from([
+            (
+                "old".into(),
+                CodexThreadOwner {
+                    project_id: "project".into(),
+                    cwd: "/old".into(),
+                    generation: 4,
+                },
+            ),
+            (
+                "new".into(),
+                CodexThreadOwner {
+                    project_id: "project".into(),
+                    cwd: "/new".into(),
+                    generation: 5,
+                },
+            ),
+        ]));
+
+        clear_codex_thread_generation(&owners, 4);
+
+        let owners = owners.lock();
+        assert!(!owners.contains_key("old"));
+        assert_eq!(owners.get("new").map(|owner| owner.generation), Some(5));
+    }
+
+    #[test]
+    fn stale_thread_operations_cannot_cross_runtime_generations() {
+        assert!(ensure_codex_generation(7, 7).is_ok());
+        assert!(ensure_codex_generation(7, 8).is_err());
     }
 }

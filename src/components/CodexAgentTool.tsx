@@ -240,6 +240,12 @@ export function CodexAgentTool({ project }: { project: Project }) {
   const efforts = supportedEfforts.length ? supportedEfforts : fallbackEfforts;
   const unavailable = modelsLoading || !listenerReady || !model;
   const retrySetup = () => {
+    generationRef.current += 1;
+    threadRef.current = "";
+    turnRef.current = "";
+    setThreadId("");
+    setTurnId("");
+    setRunning(false);
     setError("");
     setListenerAttempt(value => value + 1);
     void loadModels();

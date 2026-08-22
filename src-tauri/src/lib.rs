@@ -31,15 +31,23 @@ pub struct AppState {
     worktrees_root: std::path::PathBuf,
     active_runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     run_operations: Arc<Mutex<HashSet<String>>>,
-    codex_server: Arc<AsyncMutex<Option<codex_runtime::CodexRuntime>>>,
+    codex_server: Arc<AsyncMutex<Option<ManagedCodexRuntime>>>,
+    codex_generation: Arc<Mutex<u64>>,
     codex_threads: Arc<Mutex<HashMap<String, CodexThreadOwner>>>,
     _instance_lock: File,
+}
+
+#[derive(Clone)]
+struct ManagedCodexRuntime {
+    runtime: codex_runtime::CodexRuntime,
+    generation: u64,
 }
 
 #[derive(Clone)]
 struct CodexThreadOwner {
     project_id: String,
     cwd: String,
+    generation: u64,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -60,6 +68,7 @@ pub fn run() {
                 active_runs: Arc::new(Mutex::new(HashMap::new())),
                 run_operations: Arc::new(Mutex::new(HashSet::new())),
                 codex_server: Arc::new(AsyncMutex::new(None)),
+                codex_generation: Arc::new(Mutex::new(0)),
                 codex_threads: Arc::new(Mutex::new(HashMap::new())),
                 _instance_lock: instance_lock,
             });
@@ -69,7 +78,9 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
                 let codex_server_active = state.codex_server.try_lock().map_or(true, |server| {
-                    server.as_ref().is_some_and(|client| !client.is_closed())
+                    server
+                        .as_ref()
+                        .is_some_and(|managed| !managed.runtime.is_closed())
                 });
                 if !state.active_runs.lock().is_empty()
                     || !state.run_operations.lock().is_empty()
@@ -90,8 +101,8 @@ pub fn run() {
                             }
                         };
                         let shutdown_codex = async {
-                            if let Some(client) = codex_server.lock().await.take() {
-                                let _ = client.shutdown().await;
+                            if let Some(managed) = codex_server.lock().await.take() {
+                                let _ = managed.runtime.shutdown().await;
                             }
                         };
                         let _ = tokio::time::timeout(Duration::from_secs(40), async {
