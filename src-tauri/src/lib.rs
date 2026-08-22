@@ -75,12 +75,20 @@ pub fn run() {
                     let operations = state.run_operations.clone();
                     let codex_server = state.codex_server.clone();
                     tauri::async_runtime::spawn(async move {
-                        while !active.lock().is_empty() || !operations.lock().is_empty() {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                        if let Some(client) = codex_server.lock().await.take() {
-                            let _ = client.shutdown().await;
-                        }
+                        let settle_operations = async {
+                            while !active.lock().is_empty() || !operations.lock().is_empty() {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        };
+                        let shutdown_codex = async {
+                            if let Some(client) = codex_server.lock().await.take() {
+                                let _ = client.shutdown().await;
+                            }
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+                            tokio::join!(settle_operations, shutdown_codex);
+                        })
+                        .await;
                         let _ = window.destroy();
                     });
                 }
@@ -98,6 +106,7 @@ pub fn run() {
             commands::get_diff,
             commands::run_project_command,
             commands::cancel_project_command,
+            commands::open_local_preview,
             commands::apply_changes,
             commands::discard_run,
             commands::doctor,

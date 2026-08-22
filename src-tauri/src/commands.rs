@@ -16,11 +16,13 @@ use crate::{
 use chrono::Utc;
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -50,18 +52,28 @@ async fn codex_app_server(state: &State<'_, AppState>) -> CommandResult<CodexApp
 
 #[tauri::command]
 pub async fn list_codex_models(state: State<'_, AppState>) -> CommandResult<Vec<ModelInfo>> {
-    codex_app_server(&state)
-        .await?
-        .list_models(ModelListParams::default())
-        .await
-        .map(|response| {
-            response
-                .data
-                .into_iter()
-                .filter(|model| !model.hidden)
-                .collect()
-        })
-        .map_err(err)
+    let client = codex_app_server(&state).await?;
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut models = Vec::new();
+    loop {
+        let response = client
+            .list_models(ModelListParams {
+                cursor: cursor.clone(),
+                ..ModelListParams::default()
+            })
+            .await
+            .map_err(err)?;
+        models.extend(response.data.into_iter().filter(|model| !model.hidden));
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) || seen_cursors.len() > 64 {
+            return Err("Codex App Server returned an invalid model cursor sequence".into());
+        }
+        cursor = Some(next_cursor);
+    }
+    Ok(models)
 }
 
 #[tauri::command]
@@ -280,6 +292,19 @@ pub fn cancel_project_command(
         .ok_or_else(|| "command is not running".to_string())?;
     token.cancel();
     Ok(())
+}
+
+#[tauri::command]
+pub fn open_local_preview(app: AppHandle, url: String) -> CommandResult<()> {
+    let parsed = tauri::Url::parse(&url).map_err(err)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+    {
+        return Err("preview URLs must use localhost, 127.0.0.1, or ::1".into());
+    }
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(err)
 }
 
 #[tauri::command]

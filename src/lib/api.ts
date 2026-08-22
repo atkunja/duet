@@ -26,6 +26,7 @@ export const api = {
     () => demoVerification(command),
   ),
   cancelProjectCommand: (operationId:string) => invoke<void>("cancel_project_command",{operationId}),
+  openLocalPreview: (url:string) => invoke<void>("open_local_preview",{url}),
   applyChanges: (runId:string) => invoke<void>("apply_changes",{runId}),
   discardRun: (runId:string) => invoke<void>("discard_run",{runId}),
   doctor: () => nativeOrDemo(() => invoke<DoctorReport>("doctor"), () => demoDoctor),
