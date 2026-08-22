@@ -1,6 +1,7 @@
 use crate::{
     codex_app_server::{
-        AppServerConfig, ClientInfo, CodexAppServerClient, ModelInfo, ModelListParams,
+        AppServerConfig, AppServerError, ClientInfo, CodexAppServerClient, ModelInfo,
+        ModelListParams,
     },
     git,
     models::{
@@ -53,8 +54,27 @@ async fn codex_app_server(state: &State<'_, AppState>) -> CommandResult<CodexApp
 #[tauri::command]
 pub async fn list_codex_models(state: State<'_, AppState>) -> CommandResult<Vec<ModelInfo>> {
     let client = codex_app_server(&state).await?;
+    match collect_codex_models(&client).await {
+        Ok(models) => Ok(models),
+        Err(AppServerError::ConnectionClosed { .. }) => {
+            let mut server = state.codex_server.lock().await;
+            if server.as_ref().is_some_and(CodexAppServerClient::is_closed) {
+                *server = None;
+            }
+            drop(server);
+            let retry = codex_app_server(&state).await?;
+            collect_codex_models(&retry).await.map_err(err)
+        }
+        Err(error) => Err(err(error)),
+    }
+}
+
+async fn collect_codex_models(
+    client: &CodexAppServerClient,
+) -> Result<Vec<ModelInfo>, AppServerError> {
     let mut cursor = None;
     let mut seen_cursors = HashSet::new();
+    let mut seen_models = HashSet::new();
     let mut models = Vec::new();
     loop {
         let response = client
@@ -62,14 +82,20 @@ pub async fn list_codex_models(state: State<'_, AppState>) -> CommandResult<Vec<
                 cursor: cursor.clone(),
                 ..ModelListParams::default()
             })
-            .await
-            .map_err(err)?;
-        models.extend(response.data.into_iter().filter(|model| !model.hidden));
+            .await?;
+        models.extend(
+            response
+                .data
+                .into_iter()
+                .filter(|model| !model.hidden && seen_models.insert(model.id.clone())),
+        );
         let Some(next_cursor) = response.next_cursor else {
             break;
         };
         if !seen_cursors.insert(next_cursor.clone()) || seen_cursors.len() > 64 {
-            return Err("Codex App Server returned an invalid model cursor sequence".into());
+            return Err(AppServerError::Protocol(
+                "model/list returned an invalid cursor sequence".into(),
+            ));
         }
         cursor = Some(next_cursor);
     }
