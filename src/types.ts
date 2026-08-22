@@ -1,0 +1,24 @@
+export interface Project { id:string; name:string; path:string; language:string; buildSystem:string; testCommand:string; benchmarkCommand:string; lastUsedAt:string }
+export interface RepoInspection { path:string; branch:string; headSha:string; dirty:boolean; language:string; buildSystem:string; suggestedTestCommand:string }
+export interface StartRunRequest { projectId:string; task:string; testCommand:string; benchmarkCommand?:string; maxRepairs:number; mockAgents:boolean }
+export interface RunSummary { id:string; projectId:string; projectName:string; task:string; status:string; currentStage:string; createdAt:string; completedAt?:string; worktreePath?:string; additions:number; deletions:number }
+export interface StageRecord { id:number; runId:string; kind:string; agent:string; status:string; summary:string; rawOutput:string; startedAt:string; completedAt?:string; durationMs?:number }
+export interface ChangedFile { path:string; status:string; additions:number; deletions:number }
+export interface VerificationResult { name:string; command:string; success:boolean; exitCode?:number; stdout:string; stderr:string; durationMs:number; required:boolean }
+export interface RunDetail extends RunSummary { stages:StageRecord[]; architecture?:string; review?:string; verification:VerificationResult[]; changedFiles:ChangedFile[] }
+export interface ToolStatus { installed:boolean; authenticated?:boolean; path?:string; version?:string; detail:string }
+export interface DoctorReport { appDataWritable:boolean; databaseHealthy:boolean; git:ToolStatus; claude:ToolStatus; codex:ToolStatus; os:string }
+
+export type RunEvent =
+  | {type:"runStarted";runId:string;task:string}
+  | {type:"stageStarted";runId:string;stage:string;agent:string}
+  | {type:"agentOutput";runId:string;stage:string;stream:string;line:string}
+  | {type:"stageCompleted";runId:string;stage:string;success:boolean;summary:string}
+  | {type:"fileChanged";runId:string;path:string}
+  | {type:"verificationCompleted";runId:string;result:VerificationResult}
+  | {type:"reviewCompleted";runId:string;verdict:string;issues:number}
+  | {type:"runCompleted";runId:string;verified:boolean}
+  | {type:"runFailed";runId:string;reason:string}
+  | {type:"runCancelled";runId:string};
+
+export type DetailTab = "summary"|"activity"|"files"|"diff"|"tests"|"review"|"logs";
