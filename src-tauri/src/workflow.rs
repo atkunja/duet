@@ -194,6 +194,10 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     }
 
     let verified = required_checks_pass(&verification_results) && review.verdict == "pass";
+    if verified {
+        let digest = git::patch_sha256(&worktree, &base_sha).await?;
+        ctx.db.set_verified_patch_sha256(&ctx.run_id, &digest)?;
+    }
     ctx.db.complete_run(
         &ctx.run_id,
         if verified { "completed" } else { "failed" },
