@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { RunDetail } from "../types";
-import { RunWorkspace } from "./RunWorkspace";
+import { parseSplitDiff, RunWorkspace } from "./RunWorkspace";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn(() => Promise.resolve()) }));
 
@@ -61,5 +61,19 @@ describe("RunWorkspace", () => {
   it("renders the persisted failure reason", () => {
     render(<RunWorkspace run={run({ status: "failed", error: "Verification timed out" })} diff="" liveLogs={[]} {...handlers} />);
     expect(screen.getByText("Verification timed out")).toBeInTheDocument();
+  });
+
+  it("pairs removed and added lines in the split diff and keeps unified view available", () => {
+    const diff = "diff --git a/a.ts b/a.ts\n@@ -2,2 +2,2 @@\n-old value\n+new value\n shared";
+    expect(parseSplitDiff(diff)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ oldNumber: 2, newNumber: 2, oldText: "old value", newText: "new value", kind: "changed" }),
+      expect.objectContaining({ oldNumber: 3, newNumber: 3, oldText: "shared", newText: "shared", kind: "context" }),
+    ]));
+
+    render(<RunWorkspace run={run()} diff={diff} liveLogs={[]} {...handlers} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Diff" }));
+    expect(screen.getByRole("button", { name: "Split diff" })).toHaveClass("active");
+    fireEvent.click(screen.getByRole("button", { name: "Unified diff" }));
+    expect(screen.getByText("-old value")).toBeInTheDocument();
   });
 });
