@@ -27,7 +27,7 @@ The machine has the final say. A positive model review never overrides a failing
 
 - Add and inspect local Git repositories, including branch, SHA, dirty state, language, build system, and suggested tests.
 - Detect the locally installed `claude`, `codex`, and `git` executables and inspect authentication status where the CLI supports it.
-- Create one app-managed branch and worktree for every run. Agents never edit the selected working tree.
+- Create one app-managed branch and worktree for every run. Normal agent edits are directed to that isolated worktree.
 - Stream typed lifecycle events and stdout/stderr from cancellable, timeout-bounded Tokio subprocesses.
 - Run Codex as architect/reviewer and Claude as implementer/repairer through supported headless CLI modes.
 - Run a required test/build command and any configured benchmark independently of model opinion.
