@@ -13,7 +13,7 @@ use crate::{
         StartRunRequest, ToolStatus,
     },
     process::{run_process, OutputCallback, ProcessRequest},
-    tooling::resolve_binary,
+    tooling::{path_for_program, resolve_binary},
     verification::{self, VerificationItem},
     workflow::{self, WorkflowContext},
     AppState, CodexThreadOwner, ManagedCodexRuntime,
@@ -971,7 +971,10 @@ async fn tool_status(name: &str, version_args: &[&str], auth_args: Option<&[&str
 
 async fn bounded_tool_output(path: &Path, args: &[&str]) -> Option<(bool, String)> {
     let mut command = tokio::process::Command::new(path);
-    command.args(args).kill_on_drop(true);
+    command
+        .args(args)
+        .env("PATH", path_for_program(path))
+        .kill_on_drop(true);
     let output = tokio::time::timeout(std::time::Duration::from_secs(8), command.output())
         .await
         .ok()?

@@ -1,3 +1,4 @@
+use crate::tooling::path_for_program;
 use anyhow::{Context, Result};
 use std::{
     path::PathBuf,
@@ -45,6 +46,7 @@ pub async fn run_process(
     command
         .args(&request.args)
         .current_dir(&request.cwd)
+        .env("PATH", path_for_program(&request.program))
         .envs(request.env.iter().cloned())
         .stdin(if request.stdin.is_some() {
             Stdio::piped()
@@ -233,6 +235,43 @@ async fn terminate_process_tree(child: &mut Child, process_group: Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gui_path_launches_env_wrappers_with_sibling_interpreters() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let interpreter = directory.path().join("duet-node-test");
+        let wrapper = directory.path().join("codex-wrapper");
+        fs::write(&interpreter, "#!/bin/sh\nprintf 'gui-path-ok\\n'\n").unwrap();
+        fs::write(&wrapper, "#!/usr/bin/env duet-node-test\n").unwrap();
+        for executable in [&interpreter, &wrapper] {
+            let mut permissions = fs::metadata(executable).unwrap().permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(executable, permissions).unwrap();
+        }
+
+        let output = run_process(
+            ProcessRequest {
+                program: wrapper.to_string_lossy().into_owned(),
+                args: vec![],
+                cwd: directory.path().to_path_buf(),
+                timeout: Duration::from_secs(2),
+                env: vec![],
+                stdin: None,
+                capture_limit: 1_000_000,
+                fail_on_output_limit: false,
+            },
+            CancellationToken::new(),
+            Arc::new(|_, _| {}),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.stdout.trim(), "gui-path-ok");
+    }
 
     #[tokio::test]
     async fn captures_both_streams() {

@@ -9,6 +9,7 @@
 //! fields as `serde_json::Value`: the installed Codex CLI owns the exact schema,
 //! and newer versions may add fields without requiring a Duet release.
 
+use crate::tooling::path_for_program;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -446,6 +447,7 @@ impl CodexAppServerClient {
         let mut command = Command::new(&config.binary);
         command
             .args(args)
+            .env("PATH", path_for_program(&config.binary))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
