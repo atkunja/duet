@@ -30,6 +30,9 @@ The machine has the final say. A positive model review never overrides a failing
 - Create one app-managed branch and worktree for every run. Normal agent edits are directed to that isolated worktree.
 - Stream typed lifecycle events and stdout/stderr from cancellable, timeout-bounded Tokio subprocesses.
 - Run Codex as architect/reviewer and Claude as implementer/repairer through supported headless CLI modes.
+- Choose Duet, Codex-only, or Claude-only routing and configure each active agent's model and reasoning effort.
+- Discover installed Codex models and their supported reasoning levels through the official local Codex App Server protocol.
+- Run project commands in a streaming, cancellable Console and inspect loopback development servers in a sandboxed Preview panel.
 - Run a required test/build command and any configured benchmark independently of model opinion.
 - Repeat review/repair up to a user-selected bound and stop on repeated no-op repairs.
 - Persist projects, runs, stages, raw output, normalized output, verification, reviews, changed files, and events in SQLite.
@@ -120,14 +123,14 @@ Create the native application and DMG with:
 npm run tauri build
 ```
 
-On Apple Silicon, unsigned local artifacts are written to:
+On Apple Silicon, locally ad-hoc-signed artifacts are written to:
 
 ```text
 src-tauri/target/release/bundle/macos/Duet.app
 src-tauri/target/release/bundle/dmg/Duet_0.1.0_aarch64.dmg
 ```
 
-Code signing is intentionally not required for local development. Public distribution will require an Apple Developer ID certificate, hardened runtime configuration, signing, and notarization.
+Local builds are automatically sealed with an ad-hoc hardened-runtime signature, so `codesign --verify --deep --strict` succeeds. Public distribution still requires an Apple Developer ID certificate and notarization.
 
 ## Try it safely
 
@@ -163,8 +166,9 @@ React / TypeScript
               │
 Rust / Tauri / Tokio
   ├─ agent adapters (Claude and Codex JSONL normalization)
+  ├─ Codex App Server JSON-RPC transport and model discovery
   ├─ task graph and bounded workflow executor
-  ├─ cancellable subprocess streaming
+  ├─ cancellable process-tree and Console streaming
   ├─ deterministic verification
   ├─ Git repository/worktree safety
   └─ SQLite state and restart recovery
@@ -172,7 +176,7 @@ Rust / Tauri / Tokio
      app-managed Git worktree
 ```
 
-The backend deliberately exposes task-specific commands instead of a generic shell command to frontend JavaScript. Role prompts are separate and agent adapters share a common `Agent` trait, so routing can evolve without rewriting the workflow core.
+The backend validates project identity and serializes repository mutations before running a user-entered Console command; frontend JavaScript never receives unrestricted process handles. Role prompts are separate and agent adapters share a common `Agent` trait, so routing can evolve without rewriting the workflow core.
 
 ## Application data
 
