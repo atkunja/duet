@@ -20,6 +20,8 @@ pub struct ProcessRequest {
     pub timeout: Duration,
     pub env: Vec<(String, String)>,
     pub stdin: Option<String>,
+    pub capture_limit: usize,
+    pub fail_on_output_limit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +76,7 @@ pub async fn run_process(
 
     let mut stdout_text = String::new();
     let mut stderr_text = String::new();
+    let mut output_truncated = false;
     let deadline = tokio::time::sleep(request.timeout);
     tokio::pin!(deadline);
     enum Finish {
@@ -84,7 +87,7 @@ pub async fn run_process(
     let finish = loop {
         tokio::select! {
             Some((stream, line)) = rx.recv() => {
-                capture_chunk(stream,&line,&callback,&mut stdout_text,&mut stderr_text);
+                output_truncated |= capture_chunk(stream,&line,&callback,&mut stdout_text,&mut stderr_text,request.capture_limit);
             },
             result = child.wait() => break Finish::Exited(result.context("wait for child")?),
             _ = cancel.cancelled() => break Finish::Cancelled,
@@ -105,13 +108,26 @@ pub async fn run_process(
     let drain_deadline = tokio::time::sleep(Duration::from_secs(2));
     tokio::pin!(drain_deadline);
     loop {
-        tokio::select! {Some((stream,line))=rx.recv()=>capture_chunk(stream,&line,&callback,&mut stdout_text,&mut stderr_text),_=&mut readers=>break,_=&mut drain_deadline=>{terminate_process_tree(&mut child,process_group).await;readers.abort();break}}
+        tokio::select! {Some((stream,line))=rx.recv()=>output_truncated |= capture_chunk(stream,&line,&callback,&mut stdout_text,&mut stderr_text,request.capture_limit),_=&mut readers=>break,_=&mut drain_deadline=>{terminate_process_tree(&mut child,process_group).await;readers.abort();break}}
     }
     while let Ok((stream, line)) = rx.try_recv() {
-        capture_chunk(stream, &line, &callback, &mut stdout_text, &mut stderr_text);
+        output_truncated |= capture_chunk(
+            stream,
+            &line,
+            &callback,
+            &mut stdout_text,
+            &mut stderr_text,
+            request.capture_limit,
+        );
     }
     if matches!(finish, Finish::Exited(_)) {
         terminate_process_tree(&mut child, process_group).await;
+    }
+    if output_truncated && request.fail_on_output_limit {
+        return Err(anyhow::anyhow!(
+            "process output exceeded the {} byte capture limit",
+            request.capture_limit
+        ));
     }
     match finish {
         Finish::Exited(status) => Ok(ProcessOutput {
@@ -171,21 +187,28 @@ fn capture_chunk(
     callback: &OutputCallback,
     stdout: &mut String,
     stderr: &mut String,
-) {
+    limit: usize,
+) -> bool {
     callback(stream, chunk);
-    bounded_append(if stream == "stdout" { stdout } else { stderr }, chunk);
+    bounded_append(
+        if stream == "stdout" { stdout } else { stderr },
+        chunk,
+        limit,
+    )
 }
-fn bounded_append(target: &mut String, chunk: &str) {
-    const LIMIT: usize = 1_000_000;
+fn bounded_append(target: &mut String, chunk: &str, limit: usize) -> bool {
     const MARKER: &str = "[Duet truncated earlier output]\n";
     target.push_str(chunk);
-    if target.len() > LIMIT {
-        let keep = LIMIT - MARKER.len();
+    if target.len() > limit {
+        let keep = limit.saturating_sub(MARKER.len());
         let start = target.ceil_char_boundary(target.len() - keep);
         let tail = target[start..].to_string();
         target.clear();
         target.push_str(MARKER);
         target.push_str(&tail);
+        true
+    } else {
+        false
     }
 }
 
@@ -221,6 +244,8 @@ mod tests {
                 timeout: Duration::from_secs(2),
                 env: vec![],
                 stdin: None,
+                capture_limit: 1_000_000,
+                fail_on_output_limit: false,
             },
             CancellationToken::new(),
             Arc::new(|_, _| {}),
@@ -242,6 +267,8 @@ mod tests {
                 timeout: Duration::from_millis(20),
                 env: vec![],
                 stdin: None,
+                capture_limit: 1_000_000,
+                fail_on_output_limit: false,
             },
             CancellationToken::new(),
             Arc::new(|_, _| {}),
@@ -262,6 +289,8 @@ mod tests {
                 timeout: Duration::from_secs(2),
                 env: vec![],
                 stdin: Some("private prompt".into()),
+                capture_limit: 1_000_000,
+                fail_on_output_limit: false,
             },
             CancellationToken::new(),
             Arc::new(|_, _| {}),
@@ -294,6 +323,8 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     env: vec![],
                     stdin: None,
+                    capture_limit: 1_000_000,
+                    fail_on_output_limit: false,
                 },
                 cancel_run,
                 callback,
@@ -337,6 +368,8 @@ mod tests {
                 timeout: Duration::from_secs(10),
                 env: vec![],
                 stdin: None,
+                capture_limit: 1_000_000,
+                fail_on_output_limit: false,
             },
             CancellationToken::new(),
             Arc::new(|_, _| {}),
@@ -357,8 +390,8 @@ mod tests {
     #[tokio::test]
     async fn bounded_capture_preserves_final_structured_output() {
         let mut captured = String::new();
-        bounded_append(&mut captured, &"x".repeat(1_100_000));
-        bounded_append(&mut captured, "\n{\"verdict\":\"pass\"}\n");
+        bounded_append(&mut captured, &"x".repeat(1_100_000), 1_000_000);
+        bounded_append(&mut captured, "\n{\"verdict\":\"pass\"}\n", 1_000_000);
         assert!(captured.len() <= 1_000_000);
         assert!(captured.starts_with("[Duet truncated"));
         assert!(captured.ends_with("{\"verdict\":\"pass\"}\n"));
