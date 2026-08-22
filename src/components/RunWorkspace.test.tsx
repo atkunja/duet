@@ -36,6 +36,7 @@ const handlers = {
   onStop: vi.fn(),
   onApply: vi.fn(),
   onDiscard: vi.fn(),
+  onOpenEditor: vi.fn(),
   onError: vi.fn(),
 };
 

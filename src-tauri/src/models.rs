@@ -1,5 +1,21 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPreferences {
+    pub editor: String,
+    pub max_repairs: u8,
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self {
+            editor: "auto".into(),
+            max_repairs: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -33,6 +49,8 @@ pub struct StartRunRequest {
     pub test_command: String,
     pub benchmark_command: Option<String>,
     pub max_repairs: u8,
+    #[serde(default)]
+    pub parallel_verification: bool,
     #[serde(default)]
     pub mock_agents: bool,
     #[serde(default = "default_agent_mode")]

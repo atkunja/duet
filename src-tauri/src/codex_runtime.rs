@@ -284,6 +284,7 @@ impl CodexRuntime {
                     automatic_errors: inner.automatic_errors.clone(),
                     deadline_changed: inner.deadline_changed.clone(),
                     stop: inner.stop.clone(),
+                    closed_event_sent: inner.closed_event_sent.clone(),
                     request_timeout: server_request_timeout,
                 },
             )),
@@ -294,6 +295,7 @@ impl CodexRuntime {
                 automatic_errors: inner.automatic_errors.clone(),
                 deadline_changed: inner.deadline_changed.clone(),
                 stop: inner.stop.clone(),
+                closed_event_sent: inner.closed_event_sent.clone(),
             })),
             tokio::spawn(automatic_response_pump(
                 automatic_error_rx,
@@ -302,6 +304,7 @@ impl CodexRuntime {
                     state: inner.state.clone(),
                     events: inner.events.clone(),
                     stop: inner.stop.clone(),
+                    closed_event_sent: inner.closed_event_sent.clone(),
                     response_timeout: config.shutdown_timeout,
                 },
             )),
@@ -451,7 +454,6 @@ impl CodexRuntime {
         .await;
         self.inner.stop.cancel();
         self.inner.deadline_changed.notify_waiters();
-        self.stop_pumps().await;
 
         let pending = {
             let mut state = self.inner.state.lock().await;
@@ -482,6 +484,7 @@ impl CodexRuntime {
         };
         let _ = timeout(self.inner.shutdown_timeout, fail_pending).await;
         let shutdown_result = self.inner.client.shutdown().await;
+        self.stop_pumps().await;
         publish_closed_once(
             &self.inner.state,
             &self.inner.events,
@@ -575,6 +578,7 @@ struct RequestPumpContext {
     automatic_errors: mpsc::Sender<AutomaticErrorResponse>,
     deadline_changed: Arc<Notify>,
     stop: CancellationToken,
+    closed_event_sent: Arc<AtomicBool>,
     request_timeout: Duration,
 }
 
@@ -585,6 +589,7 @@ struct ExpirationPumpContext {
     automatic_errors: mpsc::Sender<AutomaticErrorResponse>,
     deadline_changed: Arc<Notify>,
     stop: CancellationToken,
+    closed_event_sent: Arc<AtomicBool>,
 }
 
 struct AutomaticResponseContext {
@@ -592,6 +597,7 @@ struct AutomaticResponseContext {
     state: Arc<Mutex<RuntimeState>>,
     events: broadcast::Sender<SequencedRuntimeEvent>,
     stop: CancellationToken,
+    closed_event_sent: Arc<AtomicBool>,
     response_timeout: Duration,
 }
 
@@ -681,8 +687,13 @@ async fn server_request_pump(
                             message: format!("server request stream lagged by {skipped}; closing fail-closed"),
                         },
                     ).await;
-                    context.stop.cancel();
-                    let _ = context.client.shutdown().await;
+                    terminate_after_fatal(
+                        &context.client,
+                        &context.state,
+                        &context.events,
+                        &context.stop,
+                        &context.closed_event_sent,
+                    ).await;
                     break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -710,8 +721,14 @@ async fn handle_server_request(request: ServerRequest, context: &RequestPumpCont
                 },
             )
             .await;
-            context.stop.cancel();
-            let _ = context.client.shutdown().await;
+            terminate_after_fatal(
+                &context.client,
+                &context.state,
+                &context.events,
+                &context.stop,
+                &context.closed_event_sent,
+            )
+            .await;
         }
         return;
     }
@@ -806,8 +823,14 @@ async fn expiration_pump(context: ExpirationPumpContext) {
                     },
                 )
                 .await;
-                context.stop.cancel();
-                let _ = context.client.shutdown().await;
+                terminate_after_fatal(
+                    &context.client,
+                    &context.state,
+                    &context.events,
+                    &context.stop,
+                    &context.closed_event_sent,
+                )
+                .await;
                 break;
             }
         }
@@ -857,8 +880,13 @@ async fn automatic_response_pump(
                             message: "automatic fail-closed response could not be delivered".into(),
                         },
                     ).await;
-                    context.stop.cancel();
-                    let _ = context.client.shutdown().await;
+                    terminate_after_fatal(
+                        &context.client,
+                        &context.state,
+                        &context.events,
+                        &context.stop,
+                        &context.closed_event_sent,
+                    ).await;
                     break;
                 }
             }
@@ -876,10 +904,7 @@ async fn connection_monitor(
     loop {
         tokio::select! {
             biased;
-            _ = stop.cancelled() => {
-                publish_closed_once(&state, &events, &closed_event_sent).await;
-                break;
-            },
+            _ = stop.cancelled() => break,
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 if client.is_closed() {
                     publish_closed_once(&state, &events, &closed_event_sent).await;
@@ -889,6 +914,33 @@ async fn connection_monitor(
             }
         }
     }
+}
+
+async fn terminate_after_fatal(
+    client: &CodexAppServerClient,
+    state: &Mutex<RuntimeState>,
+    events: &broadcast::Sender<SequencedRuntimeEvent>,
+    stop: &CancellationToken,
+    closed_event_sent: &AtomicBool,
+) {
+    stop.cancel();
+    let _ = client.shutdown().await;
+    let pending = {
+        let mut state = state.lock().await;
+        std::mem::take(&mut state.pending)
+    };
+    for (token, _) in pending {
+        publish_event(
+            state,
+            events,
+            CodexRuntimeEvent::ServerRequestResolved {
+                token,
+                resolution: RuntimeRequestResolution::ShuttingDown,
+            },
+        )
+        .await;
+    }
+    publish_closed_once(state, events, closed_event_sent).await;
 }
 
 async fn publish_event(
@@ -1191,6 +1243,7 @@ read_line() { IFS= read -r line || exit 90; }
 read_line
 printf '{"id":1,"result":{"userAgent":"fake/1","platformOs":"%s"}}\n' "$$"
 read_line
+printf '%s\n' '{"id":"pending-close","method":"item/fileChange/requestApproval","params":{}}'
 "#,
             "while :; do sleep 30; done\n"
         );
@@ -1204,12 +1257,28 @@ read_line
             .parse::<u32>()
             .unwrap();
         let mut events = fake.runtime.subscribe_events().await;
-        fake.runtime.shutdown().await.unwrap();
-        assert!(fake.runtime.is_closed());
         next_matching(&mut events, |event| {
-            matches!(event, CodexRuntimeEvent::Closed)
+            matches!(event, CodexRuntimeEvent::ServerRequest { .. })
         })
         .await;
+        fake.runtime.shutdown().await.unwrap();
+        assert!(fake.runtime.is_closed());
+        let mut resolved_before_close = false;
+        loop {
+            let event = events.recv().await.unwrap();
+            match event.event {
+                CodexRuntimeEvent::ServerRequestResolved {
+                    resolution: RuntimeRequestResolution::ShuttingDown,
+                    ..
+                } => resolved_before_close = true,
+                CodexRuntimeEvent::Closed => break,
+                _ => {}
+            }
+        }
+        assert!(resolved_before_close);
+        assert!(timeout(Duration::from_millis(20), events.recv())
+            .await
+            .is_err());
 
         let alive = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])

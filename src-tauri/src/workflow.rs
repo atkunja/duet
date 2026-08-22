@@ -473,7 +473,7 @@ async fn run_verification<R: Runtime>(
             node.clone(),
             execute_verification_item(ctx, worktree, item.clone()).await,
         )],
-        [(first_node, first), (second_node, second)] => {
+        [(first_node, first), (second_node, second)] if ctx.request.parallel_verification => {
             let (first_result, second_result) = tokio::join!(
                 execute_verification_item(ctx, worktree, first.clone()),
                 execute_verification_item(ctx, worktree, second.clone())
@@ -483,6 +483,16 @@ async fn run_verification<R: Runtime>(
                 (second_node.clone(), second_result),
             ]
         }
+        [(first_node, first), (second_node, second)] => vec![
+            (
+                first_node.clone(),
+                execute_verification_item(ctx, worktree, first.clone()).await,
+            ),
+            (
+                second_node.clone(),
+                execute_verification_item(ctx, worktree, second.clone()).await,
+            ),
+        ],
         _ => unreachable!("verification supports tests and an optional benchmark"),
     };
     let mut results = Vec::with_capacity(outcomes.len());
@@ -734,6 +744,7 @@ mod tests {
                 test_command: "test -f DUET_MOCK_RESULT.md".into(),
                 benchmark_command: None,
                 max_repairs: 3,
+                parallel_verification: false,
                 mock_agents: true,
                 agent_mode: "duet".into(),
                 execution_location: "local".into(),
@@ -777,7 +788,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let wait_for_benchmark = "touch .tests-ready; i=0; while [ ! -f .benchmark-ready ]; do i=$((i+1)); [ \"$i\" -gt 100 ] && exit 42; sleep 0.01; done";
         let wait_for_tests = "touch .benchmark-ready; i=0; while [ ! -f .tests-ready ]; do i=$((i+1)); [ \"$i\" -gt 100 ] && exit 43; sleep 0.01; done";
-        let context = WorkflowContext {
+        let mut context = WorkflowContext {
             app: app.handle().clone(),
             db,
             worktrees_root: data.path().join("worktrees"),
@@ -788,6 +799,7 @@ mod tests {
                 test_command: wait_for_benchmark.into(),
                 benchmark_command: Some(wait_for_tests.into()),
                 max_repairs: 1,
+                parallel_verification: true,
                 mock_agents: true,
                 agent_mode: "duet".into(),
                 execution_location: "local".into(),
@@ -815,6 +827,25 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.success));
         executor.start("review").unwrap();
+
+        context.request.parallel_verification = false;
+        context.request.test_command = "sleep 0.1; touch .ordered-ready".into();
+        context.request.benchmark_command = Some("test -f .ordered-ready".into());
+        let mut serialized = TaskExecutor::new(graph::default_workflow()).unwrap();
+        for node in ["inspect", "architect", "implement"] {
+            serialized.start(node).unwrap();
+            serialized.complete(node).unwrap();
+        }
+        let ordered = run_verification(
+            &context,
+            worktree.path(),
+            &mut serialized,
+            "tests",
+            "benchmark",
+        )
+        .await
+        .unwrap();
+        assert!(ordered.iter().all(|result| result.success));
     }
 
     struct MutatingReviewer;
@@ -886,6 +917,7 @@ mod tests {
                 test_command: "true".into(),
                 benchmark_command: None,
                 max_repairs: 1,
+                parallel_verification: false,
                 mock_agents: true,
                 agent_mode: "duet".into(),
                 execution_location: "local".into(),

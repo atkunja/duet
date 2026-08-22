@@ -34,11 +34,12 @@ The machine has the final say. A positive model review never overrides a failing
 - Discover installed Codex models and their supported reasoning levels through the official local Codex App Server protocol.
 - Ask a repository-aware Codex assistant questions through streamed App Server turns in a read-only sandbox.
 - Run project commands in a streaming, cancellable Console and inspect loopback development servers in a sandboxed Preview panel.
-- Run a required test/build command and any configured benchmark independently of model opinion.
+- Run a required test/build command and any configured benchmark independently of model opinion. Checks are serialized by default; users can opt into parallel execution when their commands do not share mutable artifacts.
 - Repeat review/repair up to a user-selected bound and stop on repeated no-op repairs.
 - Persist projects, runs, stages, raw output, normalized output, verification, reviews, changed files, and events in SQLite.
 - Reopen historical runs after restart; active runs become `interrupted` rather than incorrectly appearing complete.
 - Inspect a live timeline, activity, changed files, unified diff, tests, structured review, and raw logs.
+- Choose a preferred editor in Settings and open only registered projects or Duet-managed run worktrees through a backend-validated handoff.
 - Explicitly apply a binary Git patch only after checking that the target SHA is unchanged and its working tree is clean.
 - Run a complete no-usage development flow with **Mock agents** enabled.
 
@@ -168,7 +169,7 @@ React / TypeScript
 Rust / Tauri / Tokio
   ├─ agent adapters (Claude and Codex JSONL normalization)
   ├─ fail-closed Codex App Server runtime, model discovery, and streamed threads
-  ├─ task graph and bounded workflow executor
+  ├─ dependency-enforcing task graph with dynamic repair rounds
   ├─ cancellable process-tree and Console streaming
   ├─ deterministic verification
   ├─ Git repository/worktree safety

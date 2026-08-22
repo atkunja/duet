@@ -80,14 +80,15 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
   return <aside className="workspace-tools" aria-label="Workspace tools">
     <header className="workspace-tools-head">
       <div role="tablist" aria-label="Workspace tools">
-        <button role="tab" aria-selected={tab === "console"} className={tab === "console" ? "active" : ""} onClick={() => setTab("console")}><TerminalSquare size={14}/>Console</button>
-        <button role="tab" aria-selected={tab === "preview"} className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}><Globe2 size={14}/>Preview</button>
-        <button role="tab" aria-selected={tab === "agent"} className={tab === "agent" ? "active" : ""} onClick={() => setTab("agent")}><Bot size={14}/>Codex</button>
+        <button role="tab" aria-controls="workspace-console-panel" aria-selected={tab === "console"} className={tab === "console" ? "active" : ""} onClick={() => setTab("console")}><TerminalSquare size={14}/>Console</button>
+        <button role="tab" aria-controls="workspace-preview-panel" aria-selected={tab === "preview"} className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}><Globe2 size={14}/>Preview</button>
+        <button role="tab" aria-controls="workspace-agent-panel" aria-selected={tab === "agent"} className={tab === "agent" ? "active" : ""} onClick={() => setTab("agent")}><Bot size={14}/>Codex</button>
       </div>
       <button className="tool-close" aria-label="Close workspace tools" onClick={onClose}><X size={15}/></button>
     </header>
 
-    {tab === "agent" ? <CodexAgentTool project={project}/> : tab === "console" ? <section className="console-tool" role="tabpanel">
+    <div id="workspace-agent-panel" className="workspace-tool-panel" role="tabpanel" hidden={tab !== "agent"}><CodexAgentTool project={project}/></div>
+    <section id="workspace-console-panel" className="console-tool" role="tabpanel" hidden={tab !== "console"}>
       <div className="console-actions">
         <button onClick={() => run("git status --short --branch")} disabled={running || !canRun}>Git status</button>
         {project.testCommand && <button onClick={() => run(project.testCommand)} disabled={running || !canRun}>Run tests</button>}
@@ -98,7 +99,8 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
         <span>$</span><input aria-label="Project command" value={command} onChange={event => setCommand(event.target.value)} onKeyDown={event => { if (event.key === "Enter") run(); }} disabled={running}/>
         {running && native ? <button aria-label="Stop command" onClick={stop}><Square size={12} fill="currentColor"/></button> : <button aria-label="Run command" onClick={() => run()} disabled={!command.trim() || running || !canRun}><Play size={13} fill="currentColor"/></button>}
       </div>
-    </section> : <section className="preview-tool" role="tabpanel">
+    </section>
+    <section id="workspace-preview-panel" className="preview-tool" role="tabpanel" hidden={tab !== "preview"}>
       <div className="preview-bar">
         <input aria-label="Preview URL" value={url} onChange={event => setUrl(event.target.value)} onKeyDown={event => { if (event.key === "Enter") openPreview(); }}/>
         <button aria-label="Load preview" onClick={openPreview}><Play size={13}/></button>
@@ -107,7 +109,7 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
       </div>
       {error && <p className="console-error" role="alert">{error}</p>}
       {loadedUrl ? <iframe sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" key={`${loadedUrl}-${reloadKey}`} title="Local application preview" src={loadedUrl}/> : <div className="preview-empty"><Globe2/><strong>Preview a local app</strong><p>Start its development server in Console, then load the localhost URL here.</p></div>}
-    </section>}
+    </section>
   </aside>;
 }
 

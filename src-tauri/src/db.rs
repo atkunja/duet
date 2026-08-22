@@ -1,4 +1,6 @@
-use crate::models::{ChangedFile, Project, RunDetail, RunSummary, StageRecord, VerificationResult};
+use crate::models::{
+    AppPreferences, ChangedFile, Project, RunDetail, RunSummary, StageRecord, VerificationResult,
+};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -87,6 +89,30 @@ impl Database {
             .lock()
             .query_row("SELECT 1", [], |_| Ok(()))
             .is_ok()
+    }
+
+    pub fn get_preferences(&self) -> Result<AppPreferences> {
+        let value = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value FROM settings WHERE key='preferences'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        value
+            .map(|value| serde_json::from_str(&value).context("parse saved preferences"))
+            .unwrap_or_else(|| Ok(AppPreferences::default()))
+    }
+
+    pub fn save_preferences(&self, preferences: &AppPreferences) -> Result<()> {
+        let value = serde_json::to_string(preferences)?;
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value) VALUES('preferences',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [value],
+        )?;
+        Ok(())
     }
 
     pub fn interrupt_active_runs(&self) -> Result<()> {
@@ -454,5 +480,18 @@ mod tests {
         assert!(run.discarded_at.is_some());
         assert!(run.worktree_path.is_none());
         assert_eq!(run.status, "completed");
+    }
+
+    #[test]
+    fn preferences_round_trip_with_safe_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("db.sqlite3")).unwrap();
+        assert_eq!(db.get_preferences().unwrap(), AppPreferences::default());
+        let preferences = AppPreferences {
+            editor: "vscode".into(),
+            max_repairs: 4,
+        };
+        db.save_preferences(&preferences).unwrap();
+        assert_eq!(db.get_preferences().unwrap(), preferences);
     }
 }

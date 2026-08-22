@@ -9,8 +9,8 @@ use crate::{
     },
     git,
     models::{
-        DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest,
-        ToolStatus,
+        AppPreferences, DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary,
+        StartRunRequest, ToolStatus,
     },
     process::{run_process, OutputCallback, ProcessRequest},
     tooling::resolve_binary,
@@ -66,6 +66,21 @@ async fn codex_runtime(
                 match events.recv().await {
                     Ok(event) if event.sequence <= last_sequence => continue,
                     Ok(event) => {
+                        if sequence_has_gap(last_sequence, event.sequence) {
+                            thread_owners.lock().clear();
+                            let _ = event_app.emit(
+                                "duet://codex-event",
+                                SequencedRuntimeEvent {
+                                    sequence: event.sequence,
+                                    event: CodexRuntimeEvent::FatalProtocolError {
+                                        message: "Codex event history was incomplete; the session was reset to avoid showing stale state".into(),
+                                    },
+                                },
+                            );
+                            last_sequence = event.sequence;
+                            let _ = event_runtime.shutdown().await;
+                            continue;
+                        }
                         last_sequence = event.sequence;
                         match &event.event {
                             CodexRuntimeEvent::ServerRequest { token, .. } => {
@@ -115,6 +130,10 @@ async fn codex_runtime(
     });
     *server = Some(runtime.clone());
     Ok(runtime)
+}
+
+fn sequence_has_gap(previous: u64, next: u64) -> bool {
+    previous != 0 && next > previous.saturating_add(1)
 }
 
 #[tauri::command]
@@ -327,6 +346,9 @@ pub async fn start_run(
     }
     if request.test_command.trim().is_empty() {
         return Err("Configure a required test or build command before starting Duet".into());
+    }
+    if !(1..=5).contains(&request.max_repairs) {
+        return Err("Repair rounds must be between 1 and 5".into());
     }
     if !matches!(request.agent_mode.as_str(), "duet" | "codex" | "claude") {
         return Err("Choose Duet, Codex, or Claude as the agent mode".into());
@@ -667,6 +689,149 @@ async fn run_git_operation(
 }
 
 #[tauri::command]
+pub fn get_preferences(state: State<'_, AppState>) -> CommandResult<AppPreferences> {
+    state.db.get_preferences().map_err(err)
+}
+
+#[tauri::command]
+pub fn save_preferences(
+    state: State<'_, AppState>,
+    preferences: AppPreferences,
+) -> CommandResult<()> {
+    validate_preferences(&preferences)?;
+    state.db.save_preferences(&preferences).map_err(err)
+}
+
+#[tauri::command]
+pub async fn open_project_in_editor(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CommandResult<String> {
+    let project = state.db.get_project(&project_id).map_err(err)?;
+    let path = std::fs::canonicalize(&project.path).map_err(err)?;
+    open_in_editor(&state, &path).await
+}
+
+#[tauri::command]
+pub async fn open_run_in_editor(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CommandResult<String> {
+    let run = state.db.get_run(&run_id).map_err(err)?.run;
+    let worktree = run
+        .worktree_path
+        .ok_or_else(|| "This run no longer has an isolated worktree".to_string())?;
+    let path = std::fs::canonicalize(worktree).map_err(err)?;
+    let root = std::fs::canonicalize(&state.worktrees_root).map_err(err)?;
+    if !path.starts_with(&root) {
+        return Err("Refusing to open a worktree outside Duet's managed directory".into());
+    }
+    open_in_editor(&state, &path).await
+}
+
+fn validate_preferences(preferences: &AppPreferences) -> CommandResult<()> {
+    if !matches!(
+        preferences.editor.as_str(),
+        "auto" | "cursor" | "vscode" | "zed" | "terminal" | "finder"
+    ) {
+        return Err("Choose a supported editor".into());
+    }
+    if !(1..=5).contains(&preferences.max_repairs) {
+        return Err("Default repair rounds must be between 1 and 5".into());
+    }
+    Ok(())
+}
+
+async fn open_in_editor(state: &State<'_, AppState>, path: &Path) -> CommandResult<String> {
+    let preferences = state.db.get_preferences().map_err(err)?;
+    validate_preferences(&preferences)?;
+    let (program, args, label) = editor_command(&preferences.editor, path)?;
+    let output = run_process(
+        ProcessRequest {
+            program,
+            args,
+            cwd: path.to_path_buf(),
+            timeout: Duration::from_secs(10),
+            env: vec![],
+            stdin: None,
+            capture_limit: 64_000,
+            fail_on_output_limit: false,
+        },
+        CancellationToken::new(),
+        Arc::new(|_: &str, _: &str| {}) as OutputCallback,
+    )
+    .await
+    .map_err(err)?;
+    if !output.success {
+        return Err(format!("Could not open {label}: {}", output.stderr));
+    }
+    Ok(label)
+}
+
+#[cfg(target_os = "macos")]
+fn editor_command(preference: &str, path: &Path) -> CommandResult<(String, Vec<String>, String)> {
+    let selected = match preference {
+        "auto" => ["Cursor", "Visual Studio Code", "Zed"]
+            .into_iter()
+            .find(|name| mac_app_exists(name)),
+        "cursor" => Some("Cursor"),
+        "vscode" => Some("Visual Studio Code"),
+        "zed" => Some("Zed"),
+        "terminal" => Some("Terminal"),
+        "finder" => None,
+        _ => return Err("Choose a supported editor".into()),
+    };
+    let path = path.to_string_lossy().into_owned();
+    if let Some(app) = selected {
+        if preference != "auto" && !mac_app_exists(app) && app != "Terminal" {
+            return Err(format!(
+                "{app} is not installed in /Applications or ~/Applications"
+            ));
+        }
+        Ok((
+            "/usr/bin/open".into(),
+            vec!["-a".into(), app.into(), path],
+            app.into(),
+        ))
+    } else {
+        Ok(("/usr/bin/open".into(), vec![path], "Finder".into()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_app_exists(name: &str) -> bool {
+    let bundle = format!("{name}.app");
+    Path::new("/Applications").join(&bundle).exists()
+        || dirs::home_dir().is_some_and(|home| home.join("Applications").join(bundle).exists())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn editor_command(preference: &str, path: &Path) -> CommandResult<(String, Vec<String>, String)> {
+    let candidates: &[&str] = match preference {
+        "auto" => &["cursor", "code", "zed", "xdg-open"],
+        "cursor" => &["cursor"],
+        "vscode" => &["code"],
+        "zed" => &["zed"],
+        "terminal" | "finder" => &["xdg-open"],
+        _ => return Err("Choose a supported editor".into()),
+    };
+    let binary = candidates
+        .iter()
+        .find_map(|candidate| resolve_binary(candidate))
+        .ok_or_else(|| "The selected editor was not found".to_string())?;
+    let label = binary
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("editor")
+        .to_string();
+    Ok((
+        binary.to_string_lossy().into_owned(),
+        vec![path.to_string_lossy().into_owned()],
+        label,
+    ))
+}
+
+#[tauri::command]
 pub async fn doctor(state: State<'_, AppState>) -> CommandResult<DoctorReport> {
     let root = state
         .worktrees_root
@@ -738,4 +903,36 @@ async fn bounded_tool_output(path: &Path, args: &[&str]) -> Option<(bool, String
         .trim()
         .to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sequence_has_gap, validate_preferences, AppPreferences};
+
+    #[test]
+    fn detects_only_missing_runtime_events() {
+        assert!(!sequence_has_gap(0, 42));
+        assert!(!sequence_has_gap(41, 42));
+        assert!(!sequence_has_gap(42, 42));
+        assert!(sequence_has_gap(41, 43));
+    }
+
+    #[test]
+    fn validates_editor_and_repair_preferences() {
+        assert!(validate_preferences(&AppPreferences {
+            editor: "cursor".into(),
+            max_repairs: 3,
+        })
+        .is_ok());
+        assert!(validate_preferences(&AppPreferences {
+            editor: "custom-shell".into(),
+            max_repairs: 3,
+        })
+        .is_err());
+        assert!(validate_preferences(&AppPreferences {
+            editor: "auto".into(),
+            max_repairs: 0,
+        })
+        .is_err());
+    }
 }

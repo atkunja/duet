@@ -7,7 +7,15 @@ import { WorkspaceTools } from "./WorkspaceTools";
 const eventState = vi.hoisted(() => ({ listener: undefined as ((event: { payload: { operationId:string;stream:string;chunk:string } }) => void) | undefined }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockImplementation((_event, listener) => { eventState.listener = listener; return Promise.resolve(vi.fn()); }) }));
 vi.mock("../lib/api", () => ({
-  api: { runProjectCommand: vi.fn(), cancelProjectCommand: vi.fn().mockResolvedValue(undefined), openLocalPreview: vi.fn().mockResolvedValue(undefined) },
+  api: {
+    runProjectCommand: vi.fn(),
+    cancelProjectCommand: vi.fn().mockResolvedValue(undefined),
+    openLocalPreview: vi.fn().mockResolvedValue(undefined),
+    listCodexModels: vi.fn().mockResolvedValue([{ id:"sol", model:"sol", displayName:"Sol", hidden:false, defaultReasoningEffort:"low", supportedReasoningEfforts:[{reasoningEffort:"low"}], inputModalities:["text"], supportsPersonality:true, isDefault:true }]),
+    startCodexThread: vi.fn().mockResolvedValue({ id:"thread-1", ephemeral:true }),
+    startCodexTurn: vi.fn().mockResolvedValue({ id:"turn-1", status:"inProgress", items:[] }),
+    interruptCodexTurn: vi.fn().mockResolvedValue(undefined),
+  },
   errorMessage: (error: unknown) => String(error),
   isDevelopmentPreview: false,
   isTauriRuntime: true,
@@ -94,5 +102,18 @@ describe("WorkspaceTools", () => {
     const operationId = await waitFor(() => vi.mocked(api.runProjectCommand).mock.calls[0][2]);
     unmount();
     expect(api.cancelProjectCommand).toHaveBeenCalledWith(operationId);
+  });
+
+  it("keeps an active Codex session mounted while visiting another tool", async () => {
+    render(<WorkspaceTools project={project} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Assistant model" })).toHaveValue("sol"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Codex" }), { target: { value: "Inspect the project" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to Codex" }));
+    await waitFor(() => expect(api.startCodexTurn).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "Console" }));
+    expect(api.interruptCodexTurn).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
+    expect(screen.getByText("Inspect the project")).toBeInTheDocument();
   });
 });

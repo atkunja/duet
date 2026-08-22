@@ -5,14 +5,14 @@ import type { DetailTab, LiveLog, RunDetail } from "../types";
 import { duration, shortId, titleCase } from "../lib/format";
 import { StatusBadge, StatusIcon } from "./Status";
 
-interface Props {run:RunDetail;diff:string;liveLogs:LiveLog[];onStop:()=>void;onApply:()=>void;onDiscard:()=>void;onError:(message:string)=>void;busyAction?:string}
+interface Props {run:RunDetail;diff:string;liveLogs:LiveLog[];onStop:()=>void;onApply:()=>void;onDiscard:()=>void;onOpenEditor:()=>void;onError:(message:string)=>void;busyAction?:string}
 const tabs:{id:DetailTab;label:string;icon:typeof ListTree}[]=[{id:"summary",label:"Summary",icon:ListTree},{id:"activity",label:"Activity",icon:ChevronRight},{id:"files",label:"Files",icon:FileCode2},{id:"diff",label:"Diff",icon:Code2},{id:"tests",label:"Tests",icon:TestTube2},{id:"review",label:"Review",icon:ShieldCheck},{id:"logs",label:"Logs",icon:TerminalSquare}];
 
-export function RunWorkspace({run,diff,liveLogs,onStop,onApply,onDiscard,onError,busyAction}:Props){
+export function RunWorkspace({run,diff,liveLogs,onStop,onApply,onDiscard,onOpenEditor,onError,busyAction}:Props){
   const [tab,setTab]=useState<DetailTab>("summary"); const active=["running","queued"].includes(run.status);
   return <main className="run-page">
     <header className="topbar run-header"><div><div className="run-kicker"><span>RUN #{shortId(run.id)}</span><StatusBadge status={run.status}/></div><h1>{run.task}</h1><p>{run.projectName} · {run.discardedAt?"Worktree discarded":run.worktreePath?"Isolated worktree":"Preparing worktree"}</p></div><div className="header-actions">
-      {run.worktreePath&&<button className="secondary-button" onClick={()=>openPath(run.worktreePath!).catch(error=>onError(String(error)))}><ExternalLink size={14}/> Open worktree</button>}
+      {run.worktreePath&&<><button className="secondary-button" disabled={!!busyAction} onClick={onOpenEditor}><Code2 size={14}/> Open in editor</button><button className="secondary-button" onClick={()=>openPath(run.worktreePath!).catch(error=>onError(String(error)))}><ExternalLink size={14}/> Reveal</button></>}
       {active?<button className="danger-button" onClick={onStop}><Square size={13} fill="currentColor"/> Stop run</button>:run.appliedAt?<button className="secondary-button" disabled><Check size={14}/> Applied</button>:run.worktreePath&&run.status==="completed"?<button className="primary-button compact" disabled={!!busyAction} onClick={onApply}><GitMerge size={15}/>{busyAction==="apply"?"Applying…":"Apply changes"}</button>:null}
     </div></header>
     <div className="tabs" role="tablist" aria-label="Run details">{tabs.map(item=><button role="tab" aria-selected={tab===item.id} key={item.id} className={tab===item.id?"active":""} onClick={()=>setTab(item.id)}><item.icon size={14}/>{item.label}{item.id==="files"&&run.changedFiles.length>0?<span>{run.changedFiles.length}</span>:null}</button>)}</div>
