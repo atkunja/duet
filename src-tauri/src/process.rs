@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use std::{
     path::PathBuf,
     process::Stdio,
@@ -110,6 +110,9 @@ pub async fn run_process(
     while let Ok((stream, line)) = rx.try_recv() {
         capture_chunk(stream, &line, &callback, &mut stdout_text, &mut stderr_text);
     }
+    if matches!(finish, Finish::Exited(_)) {
+        terminate_process_tree(&mut child, process_group).await;
+    }
     match finish {
         Finish::Exited(status) => Ok(ProcessOutput {
             success: status.success(),
@@ -118,7 +121,16 @@ pub async fn run_process(
             stderr: stderr_text,
             duration_ms: started.elapsed().as_millis() as u64,
         }),
-        Finish::Cancelled => Err(anyhow!("process cancelled")),
+        Finish::Cancelled => {
+            stderr_text.push_str("\n[Duet] process cancelled\n");
+            Ok(ProcessOutput {
+                success: false,
+                exit_code: None,
+                stdout: stdout_text,
+                stderr: stderr_text,
+                duration_ms: started.elapsed().as_millis() as u64,
+            })
+        }
         Finish::TimedOut => {
             stderr_text.push_str(&format!(
                 "\n[Duet] process timed out after {} seconds\n",
@@ -181,6 +193,9 @@ async fn terminate_process_tree(child: &mut Child, process_group: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = process_group {
         unsafe {
+            if libc::kill(-(pid as i32), 0) != 0 {
+                return;
+            }
             libc::kill(-(pid as i32), libc::SIGTERM);
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -295,12 +310,9 @@ mod tests {
             .lock()
             .expect("shell should report its child PID");
         cancel.cancel();
-        assert!(task
-            .await
-            .unwrap()
-            .unwrap_err()
-            .to_string()
-            .contains("cancelled"));
+        let result = task.await.unwrap().unwrap();
+        assert!(!result.success);
+        assert!(result.stderr.contains("cancelled"));
         let alive = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stdout(Stdio::null())
@@ -317,7 +329,10 @@ mod tests {
         let result = run_process(
             ProcessRequest {
                 program: "sh".into(),
-                args: vec!["-c".into(), "sleep 30 & exit 0".into()],
+                args: vec![
+                    "-c".into(),
+                    "sleep 30 >/dev/null 2>&1 & echo $!; exit 0".into(),
+                ],
                 cwd: std::env::temp_dir(),
                 timeout: Duration::from_secs(10),
                 env: vec![],
@@ -330,6 +345,14 @@ mod tests {
         .unwrap();
         assert!(result.success);
         assert!(started.elapsed() < Duration::from_secs(4));
+        let pid = result.stdout.trim();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(!alive, "detached descendant {pid} survived direct exit");
     }
     #[tokio::test]
     async fn bounded_capture_preserves_final_structured_output() {
