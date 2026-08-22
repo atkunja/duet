@@ -22,6 +22,7 @@ export function CodexAgentTool({ project }: { project: Project }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [running, setRunning] = useState(false);
   const [listenerReady, setListenerReady] = useState(!isTauriRuntime);
+  const [listenerAttempt, setListenerAttempt] = useState(0);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [error, setError] = useState("");
   const threadRef = useRef("");
@@ -80,8 +81,25 @@ export function CodexAgentTool({ project }: { project: Project }) {
       if (disposed) return;
       const event = payload.event;
       if (event.kind === "fatalProtocolError") {
+        generationRef.current += 1;
+        threadRef.current = "";
+        turnRef.current = "";
+        setThreadId("");
+        setTurnId("");
         setError(event.message);
         setRunning(false);
+        return;
+      }
+      if (event.kind === "closed" || event.kind === "shuttingDown") {
+        generationRef.current += 1;
+        threadRef.current = "";
+        turnRef.current = "";
+        setThreadId("");
+        setTurnId("");
+        setRunning(false);
+        if (event.kind === "closed") {
+          setError("Codex disconnected. Retry to start a fresh local session.");
+        }
         return;
       }
       if (event.kind !== "notification") return;
@@ -119,9 +137,9 @@ export function CodexAgentTool({ project }: { project: Project }) {
     return () => {
       disposed = true;
       setListenerReady(false);
-      void off.then(unlisten => unlisten?.());
+      void off.then(unlisten => unlisten?.()).catch(() => {});
     };
-  }, []);
+  }, [listenerAttempt]);
 
   useEffect(() => () => {
     generationRef.current += 1;
@@ -221,6 +239,11 @@ export function CodexAgentTool({ project }: { project: Project }) {
   const supportedEfforts = selected?.supportedReasoningEfforts.map(item => item.reasoningEffort) ?? [];
   const efforts = supportedEfforts.length ? supportedEfforts : fallbackEfforts;
   const unavailable = modelsLoading || !listenerReady || !model;
+  const retrySetup = () => {
+    setError("");
+    setListenerAttempt(value => value + 1);
+    void loadModels();
+  };
 
   return <section className="codex-agent-tool" role="tabpanel">
     <header className="codex-agent-bar">
@@ -236,14 +259,14 @@ export function CodexAgentTool({ project }: { project: Project }) {
         </select>
       </div>
     </header>
-    <div className="codex-chat-log">
+    <div className="codex-chat-log" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false">
       {messages.length ? messages.map(message => <article key={message.id} className={message.role}>
         <span>{message.role === "assistant" ? "CX" : "You"}</span><p>{message.text}</p>
       </article>) : <div className="codex-chat-empty"><Bot/><strong>Ask Codex about this project</strong><p>Explore the codebase, plan changes, or investigate a bug. This assistant is sandboxed read-only; start a Duet run to modify files.</p></div>}
-      {running && <div className="codex-thinking"><i/><i/><i/>Codex is working…</div>}
+      {running && <div className="codex-thinking" role="status"><i/><i/><i/>Codex is working…</div>}
       <div ref={endRef}/>
     </div>
-    {error && <div className="codex-setup-error" role="alert"><span>{error}</span>{!running && <button onClick={() => void loadModels()}><RotateCw size={11}/>Retry</button>}</div>}
+    {error && <div className="codex-setup-error" role="alert"><span>{error}</span>{!running && <button onClick={retrySetup}><RotateCw size={11}/>Retry</button>}</div>}
     <div className="codex-chat-input">
       <textarea aria-label="Message Codex" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={modelsLoading ? "Loading Codex models…" : listenerReady ? "Ask about the repository…" : "Connecting to Codex…"} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }}/>
       {running ? <button aria-label="Stop Codex" onClick={stop} disabled={!isTauriRuntime}><Square size={12} fill="currentColor"/></button> : <button aria-label="Send to Codex" onClick={send} disabled={!prompt.trim() || unavailable}><ArrowUp size={14}/></button>}

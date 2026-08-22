@@ -3,7 +3,10 @@ use crate::{
         AppServerConfig, AppServerError, ClientInfo, ModelInfo, ModelListParams, ThreadStartParams,
         TurnStartParams,
     },
-    codex_runtime::{CodexRuntime, CodexRuntimeConfig, CodexRuntimeError, CodexRuntimeEvent},
+    codex_runtime::{
+        CodexRuntime, CodexRuntimeConfig, CodexRuntimeError, CodexRuntimeEvent,
+        SequencedRuntimeEvent,
+    },
     git,
     models::{
         DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest,
@@ -66,7 +69,7 @@ async fn codex_runtime(
                         last_sequence = event.sequence;
                         match &event.event {
                             CodexRuntimeEvent::ServerRequest { token, .. } => {
-                                if event_runtime
+                                match event_runtime
                                     .respond_error(
                                         token,
                                         -32_002,
@@ -74,10 +77,23 @@ async fn codex_runtime(
                                         None,
                                     )
                                     .await
-                                    .is_err()
                                 {
-                                    let _ = event_runtime.shutdown().await;
-                                    return;
+                                    Ok(()) | Err(CodexRuntimeError::UnknownRequestToken) => {}
+                                    Err(error) => {
+                                        thread_owners.lock().clear();
+                                        let _ = event_app.emit(
+                                            "duet://codex-event",
+                                            SequencedRuntimeEvent {
+                                                sequence: event.sequence,
+                                                event: CodexRuntimeEvent::FatalProtocolError {
+                                                    message: format!(
+                                                        "Codex request rejection failed: {error}"
+                                                    ),
+                                                },
+                                            },
+                                        );
+                                        let _ = event_runtime.shutdown().await;
+                                    }
                                 }
                             }
                             CodexRuntimeEvent::Closed => {

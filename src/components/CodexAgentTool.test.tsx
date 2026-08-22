@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listen } from "@tauri-apps/api/event";
 import type { CodexTurnInfo, Project } from "../types";
 import { api } from "../lib/api";
 import { CodexAgentTool } from "./CodexAgentTool";
@@ -97,5 +98,27 @@ describe("CodexAgentTool", () => {
     render(<CodexAgentTool project={project}/>);
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Assistant reasoning" })).toHaveValue("high"));
     expect(screen.getByRole("option", { name: "Extra high" })).toBeInTheDocument();
+  });
+
+  it("rebinds the native event stream when setup is retried", async () => {
+    vi.mocked(listen).mockRejectedValueOnce(new Error("listener unavailable"));
+    render(<CodexAgentTool project={project}/>);
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("listener unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(listen).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText("New repository thread")).toBeInTheDocument());
+  });
+
+  it("drops stale thread ownership after the runtime closes", async () => {
+    render(<CodexAgentTool project={project}/>);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Assistant model" })).toHaveValue("sol"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Codex" }), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to Codex" }));
+    await waitFor(() => expect(api.startCodexTurn).toHaveBeenCalledTimes(1));
+    await act(async () => eventState.listener?.({ payload: { sequence: 5, event: { kind: "closed" } } }));
+    expect(screen.getByRole("alert")).toHaveTextContent("disconnected");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Codex" }), { target: { value: "Second" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to Codex" }));
+    await waitFor(() => expect(api.startCodexThread).toHaveBeenCalledTimes(2));
   });
 });

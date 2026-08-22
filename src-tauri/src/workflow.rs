@@ -5,7 +5,7 @@ use crate::{
     },
     db::Database,
     git,
-    graph::{self, TaskStatus},
+    graph::{self, TaskExecutor},
     models::{RunEvent, StartRunRequest, VerificationResult},
     process::OutputCallback,
     prompts,
@@ -38,14 +38,13 @@ type WorkflowAgents = (
 );
 
 pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
-    let mut task_graph = graph::default_workflow();
-    task_graph.validate()?;
+    let mut executor = TaskExecutor::new(graph::default_workflow())?;
     let project = ctx.db.get_project(&ctx.request.project_id)?;
     let repo = PathBuf::from(&project.path);
     let base_sha = ctx.db.base_sha_for_run(&ctx.run_id)?;
+    executor.start("inspect")?;
     let inspection = git::inspect_repository(&repo).await?;
-    task_graph.set_status("inspect", TaskStatus::Completed)?;
-    let _ready_nodes = task_graph.ready();
+    executor.complete("inspect")?;
     emit(
         &ctx,
         RunEvent::RunStarted {
@@ -147,6 +146,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         inspection.build_system,
         inspection.dirty
     );
+    executor.start("architect")?;
     let architecture_result = run_agent(
         &ctx,
         architect_agent.as_ref(),
@@ -157,16 +157,19 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     )
     .await?;
     if !architecture_result.success {
+        executor.fail("architect")?;
         return Err(anyhow!(
             "{} architecture failed: {}",
             architect_agent.name(),
             architecture_result.stderr
         ));
     }
+    executor.complete("architect")?;
     let architecture = parse_architecture(&architecture_result.normalized_output)?;
     let architecture_json = serde_json::to_string_pretty(&architecture)?;
     ctx.db.set_architecture(&ctx.run_id, &architecture_json)?;
 
+    executor.start("implement")?;
     let implementation = run_agent(
         &ctx,
         builder_agent.as_ref(),
@@ -181,15 +184,19 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     )
     .await?;
     if !implementation.success {
+        executor.fail("implement")?;
         return Err(anyhow!(
             "{} implementation failed: {}",
             builder_agent.name(),
             implementation.stderr
         ));
     }
+    executor.complete("implement")?;
     refresh_changes(&ctx, &worktree, &base_sha).await?;
 
-    let mut verification_results = run_verification(&ctx, &worktree).await?;
+    let mut verification_results =
+        run_verification(&ctx, &worktree, &mut executor, "tests", "benchmark").await?;
+    executor.start("review")?;
     let (mut review, mut reviewed_patch_sha256) = perform_review_snapshot(
         &ctx,
         reviewer_agent.as_ref(),
@@ -199,6 +206,10 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         &verification_results,
     )
     .await?;
+    executor.complete("review")?;
+    executor.start("decision")?;
+    executor.complete("decision")?;
+    let mut previous_decision = "decision".to_string();
     let mut last_diff = git::diff(&worktree, &base_sha).await.unwrap_or_default();
     let mut unchanged_repairs = 0u8;
     let mut round = 0u8;
@@ -210,6 +221,8 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
             return Err(anyhow!("run cancelled"));
         }
         round += 1;
+        let round_nodes = executor.add_repair_round(round, &previous_decision)?;
+        executor.start(&round_nodes.repair)?;
         let verification_text = verification::summarize(&verification_results);
         let review_json = serde_json::to_string_pretty(&review)?;
         let repair = run_agent(
@@ -228,12 +241,14 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         )
         .await?;
         if !repair.success {
+            executor.fail(&round_nodes.repair)?;
             return Err(anyhow!(
                 "{} repair round {round} failed: {}",
                 repair_agent.name(),
                 repair.stderr
             ));
         }
+        executor.complete(&round_nodes.repair)?;
         let new_diff = git::diff(&worktree, &base_sha).await.unwrap_or_default();
         if new_diff == last_diff {
             unchanged_repairs += 1;
@@ -242,7 +257,15 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         }
         last_diff = new_diff;
         refresh_changes(&ctx, &worktree, &base_sha).await?;
-        verification_results = run_verification(&ctx, &worktree).await?;
+        verification_results = run_verification(
+            &ctx,
+            &worktree,
+            &mut executor,
+            &round_nodes.tests,
+            &round_nodes.benchmark,
+        )
+        .await?;
+        executor.start(&round_nodes.review)?;
         (review, reviewed_patch_sha256) = perform_review_snapshot(
             &ctx,
             reviewer_agent.as_ref(),
@@ -252,6 +275,10 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
             &verification_results,
         )
         .await?;
+        executor.complete(&round_nodes.review)?;
+        executor.start(&round_nodes.decision)?;
+        executor.complete(&round_nodes.decision)?;
+        previous_decision = round_nodes.decision;
         if unchanged_repairs >= 2 {
             break;
         }
@@ -364,6 +391,9 @@ async fn run_agent<R: Runtime>(
 async fn run_verification<R: Runtime>(
     ctx: &WorkflowContext<R>,
     worktree: &Path,
+    executor: &mut TaskExecutor,
+    tests_node: &str,
+    benchmark_node: &str,
 ) -> Result<Vec<VerificationResult>> {
     ctx.db.set_run_stage(&ctx.run_id, "verify")?;
     let stage_id = ctx.db.start_stage(&ctx.run_id, "verify", "Duet")?;
@@ -377,12 +407,18 @@ async fn run_verification<R: Runtime>(
     );
     let mut items = Vec::new();
     if !ctx.request.test_command.trim().is_empty() {
-        items.push(VerificationItem {
-            name: "Tests".into(),
-            command: ctx.request.test_command.clone(),
-            timeout: Duration::from_secs(20 * 60),
-            required: true,
-        });
+        executor.start(tests_node)?;
+        items.push((
+            tests_node.to_string(),
+            VerificationItem {
+                name: "Tests".into(),
+                command: ctx.request.test_command.clone(),
+                timeout: Duration::from_secs(20 * 60),
+                required: true,
+            },
+        ));
+    } else {
+        executor.skip(tests_node)?;
     }
     if let Some(command) = ctx
         .request
@@ -390,12 +426,18 @@ async fn run_verification<R: Runtime>(
         .as_ref()
         .filter(|s| !s.trim().is_empty())
     {
-        items.push(VerificationItem {
-            name: "Benchmark".into(),
-            command: command.clone(),
-            timeout: Duration::from_secs(30 * 60),
-            required: true,
-        });
+        executor.start(benchmark_node)?;
+        items.push((
+            benchmark_node.to_string(),
+            VerificationItem {
+                name: "Benchmark".into(),
+                command: command.clone(),
+                timeout: Duration::from_secs(30 * 60),
+                required: true,
+            },
+        ));
+    } else {
+        executor.skip(benchmark_node)?;
     }
     if items.is_empty() {
         let result = VerificationResult {
@@ -426,28 +468,26 @@ async fn run_verification<R: Runtime>(
         );
         return Ok(vec![result]);
     }
-    let mut results = Vec::new();
-    for item in items {
-        let result = match verification::execute(
-            item.clone(),
-            worktree,
-            ctx.cancel.clone(),
-            output_callback(ctx, "verify"),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => VerificationResult {
-                name: item.name,
-                command: item.command,
-                success: false,
-                exit_code: None,
-                stdout: String::new(),
-                stderr: error.to_string(),
-                duration_ms: 0,
-                required: item.required,
-            },
-        };
+    let outcomes = match items.as_slice() {
+        [(node, item)] => vec![(
+            node.clone(),
+            execute_verification_item(ctx, worktree, item.clone()).await,
+        )],
+        [(first_node, first), (second_node, second)] => {
+            let (first_result, second_result) = tokio::join!(
+                execute_verification_item(ctx, worktree, first.clone()),
+                execute_verification_item(ctx, worktree, second.clone())
+            );
+            vec![
+                (first_node.clone(), first_result),
+                (second_node.clone(), second_result),
+            ]
+        }
+        _ => unreachable!("verification supports tests and an optional benchmark"),
+    };
+    let mut results = Vec::with_capacity(outcomes.len());
+    for (node, result) in outcomes {
+        executor.complete(&node)?;
         ctx.db.add_verification(&ctx.run_id, &result)?;
         emit(
             ctx,
@@ -489,6 +529,33 @@ async fn run_verification<R: Runtime>(
         },
     );
     Ok(results)
+}
+
+async fn execute_verification_item<R: Runtime>(
+    ctx: &WorkflowContext<R>,
+    worktree: &Path,
+    item: VerificationItem,
+) -> VerificationResult {
+    match verification::execute(
+        item.clone(),
+        worktree,
+        ctx.cancel.clone(),
+        output_callback(ctx, "verify"),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => VerificationResult {
+            name: item.name,
+            command: item.command,
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: error.to_string(),
+            duration_ms: 0,
+            required: item.required,
+        },
+    }
 }
 
 async fn perform_review_snapshot<R: Runtime>(
@@ -687,6 +754,67 @@ mod tests {
             .iter()
             .any(|f| f.path == "DUET_MOCK_RESULT.md"));
         assert!(!source.path().join("DUET_MOCK_RESULT.md").exists());
+    }
+
+    #[tokio::test]
+    async fn schedules_independent_verification_nodes_concurrently() {
+        let worktree = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(&data.path().join("test.sqlite3")).unwrap());
+        let project = Project {
+            id: "parallel-project".into(),
+            name: "fixture".into(),
+            path: worktree.path().to_string_lossy().into_owned(),
+            language: "Shell".into(),
+            build_system: "Custom".into(),
+            test_command: String::new(),
+            benchmark_command: String::new(),
+            last_used_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_project(&project).unwrap();
+        db.create_run("parallel-run", &project.id, "verify", "base")
+            .unwrap();
+        let app = tauri::test::mock_app();
+        let wait_for_benchmark = "touch .tests-ready; i=0; while [ ! -f .benchmark-ready ]; do i=$((i+1)); [ \"$i\" -gt 100 ] && exit 42; sleep 0.01; done";
+        let wait_for_tests = "touch .benchmark-ready; i=0; while [ ! -f .tests-ready ]; do i=$((i+1)); [ \"$i\" -gt 100 ] && exit 43; sleep 0.01; done";
+        let context = WorkflowContext {
+            app: app.handle().clone(),
+            db,
+            worktrees_root: data.path().join("worktrees"),
+            run_id: "parallel-run".into(),
+            request: StartRunRequest {
+                project_id: project.id,
+                task: "verify".into(),
+                test_command: wait_for_benchmark.into(),
+                benchmark_command: Some(wait_for_tests.into()),
+                max_repairs: 1,
+                mock_agents: true,
+                agent_mode: "duet".into(),
+                execution_location: "local".into(),
+                codex_model: "gpt-5.6-sol".into(),
+                claude_model: "sonnet".into(),
+                codex_reasoning: "high".into(),
+                claude_reasoning: "high".into(),
+            },
+            cancel: CancellationToken::new(),
+        };
+        let mut executor = TaskExecutor::new(graph::default_workflow()).unwrap();
+        for node in ["inspect", "architect", "implement"] {
+            executor.start(node).unwrap();
+            executor.complete(node).unwrap();
+        }
+        let results = run_verification(
+            &context,
+            worktree.path(),
+            &mut executor,
+            "tests",
+            "benchmark",
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.success));
+        executor.start("review").unwrap();
     }
 
     struct MutatingReviewer;

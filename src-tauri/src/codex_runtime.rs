@@ -336,6 +336,10 @@ impl CodexRuntime {
         let live = self.inner.events.subscribe();
         let high_water = state.next_sequence.saturating_sub(1);
         let mut backlog: Vec<_> = state.history.iter().cloned().collect();
+        backlog.retain(|event| match &event.event {
+            CodexRuntimeEvent::ServerRequest { token, .. } => state.pending.contains_key(token),
+            _ => true,
+        });
         let mut sequences: HashSet<_> = backlog.iter().map(|event| event.sequence).collect();
         for pending in state.pending.values() {
             if sequences.insert(pending.event.sequence) {
@@ -872,7 +876,10 @@ async fn connection_monitor(
     loop {
         tokio::select! {
             biased;
-            _ = stop.cancelled() => break,
+            _ = stop.cancelled() => {
+                publish_closed_once(&state, &events, &closed_event_sent).await;
+                break;
+            },
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 if client.is_closed() {
                     publish_closed_once(&state, &events, &closed_event_sent).await;
@@ -1130,16 +1137,14 @@ while read_line; do :; done
             .unwrap();
         assert_eq!(thread.thread.id, "thr_resolved");
         let mut events = fake.runtime.subscribe_events().await;
-        let resolved = next_matching(&mut events, |event| {
-            matches!(
-                event,
-                CodexRuntimeEvent::ServerRequestResolved {
-                    resolution: RuntimeRequestResolution::ClearedByServer,
-                    ..
-                }
-            )
-        })
-        .await;
+        let resolved = events.recv().await.unwrap();
+        assert!(matches!(
+            &resolved.event,
+            CodexRuntimeEvent::ServerRequestResolved {
+                resolution: RuntimeRequestResolution::ClearedByServer,
+                ..
+            }
+        ));
         let token = match resolved.event {
             CodexRuntimeEvent::ServerRequestResolved { token, .. } => token,
             _ => unreachable!(),
