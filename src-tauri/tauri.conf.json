@@ -10,7 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "macOSPrivateApi": true,
     "windows": [{
       "title": "Duet",
       "width": 1320,
@@ -23,7 +22,7 @@
       "transparent": false,
       "backgroundColor": "#0c0d10"
     }],
-    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src ipc: http://ipc.localhost" }
+    "security": { "csp": "default-src 'self'; style-src 'self'; img-src 'self' data: asset: https://asset.localhost; connect-src ipc: http://ipc.localhost" }
   },
   "bundle": {
     "active": true,
