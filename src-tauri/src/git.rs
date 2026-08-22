@@ -6,7 +6,7 @@ use tokio::process::Command;
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git").arg("-C").arg(repo).args(args).output().await.context("launch git")?;
     if !output.status.success() { return Err(anyhow!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim())); }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
 }
 
 pub async fn inspect_repository(path: &Path) -> Result<RepoInspection> {
@@ -65,7 +65,9 @@ pub async fn changed_files(worktree: &Path) -> Result<Vec<ChangedFile>> {
 
 pub async fn diff(worktree: &Path) -> Result<String> {
     let _ = git(worktree, &["add", "-N", "."]).await;
-    git(worktree, &["diff", "--no-ext-diff", "--binary", "HEAD"]).await
+    let mut patch=git(worktree, &["diff", "--no-ext-diff", "--binary", "HEAD"]).await?;
+    if !patch.is_empty() && !patch.ends_with('\n'){patch.push('\n');}
+    Ok(patch)
 }
 
 pub async fn apply_worktree_changes(repo: &Path, worktree: &Path, expected_head: &str) -> Result<()> {
@@ -89,5 +91,16 @@ mod tests {
     fn detects_rust_projects() {
         let dir = tempfile::tempdir().unwrap(); std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
         assert_eq!(detect_project(dir.path()).0, "Rust");
+    }
+
+    #[tokio::test]
+    async fn isolates_and_explicitly_applies_a_patch() {
+        let source=tempfile::tempdir().unwrap();
+        git(source.path(),&["init"]).await.unwrap();git(source.path(),&["config","user.email","duet@example.test"]).await.unwrap();git(source.path(),&["config","user.name","Duet Test"]).await.unwrap();
+        std::fs::write(source.path().join("README.md"),"base\n").unwrap();git(source.path(),&["add","README.md"]).await.unwrap();git(source.path(),&["commit","-m","base"]).await.unwrap();
+        let base=git(source.path(),&["rev-parse","HEAD"]).await.unwrap();let managed=tempfile::tempdir().unwrap();let (worktree,_)=create_worktree(source.path(),managed.path(),"12345678-test",&base).await.unwrap();
+        std::fs::write(worktree.join("feature.txt"),"isolated\n").unwrap();
+        assert!(!source.path().join("feature.txt").exists());assert!(changed_files(&worktree).await.unwrap().iter().any(|f|f.path=="feature.txt"));
+        apply_worktree_changes(source.path(),&worktree,&base).await.unwrap();assert_eq!(std::fs::read_to_string(source.path().join("feature.txt")).unwrap(),"isolated\n");
     }
 }
