@@ -24,6 +24,8 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
             timeout: Duration::from_secs(120),
             env: vec![],
             stdin: None,
+            capture_limit: 64 * 1024 * 1024,
+            fail_on_output_limit: true,
         },
         CancellationToken::new(),
         Arc::new(|_: &str, _: &str| {}) as OutputCallback,
@@ -205,7 +207,11 @@ pub async fn diff(worktree: &Path, base_sha: &str) -> Result<String> {
 
 pub async fn patch_sha256(worktree: &Path, base_sha: &str) -> Result<String> {
     let patch = diff(worktree, base_sha).await?;
-    Ok(format!("{:x}", Sha256::digest(patch.as_bytes())))
+    Ok(patch_content_sha256(&patch))
+}
+
+pub fn patch_content_sha256(patch: &str) -> String {
+    format!("{:x}", Sha256::digest(patch.as_bytes()))
 }
 
 pub async fn apply_worktree_changes(
@@ -260,6 +266,8 @@ async fn apply_patch(repo: &Path, patch: &str, check_only: bool) -> Result<()> {
             timeout: Duration::from_secs(30),
             env: vec![],
             stdin: Some(patch.into()),
+            capture_limit: 1_000_000,
+            fail_on_output_limit: false,
         },
         CancellationToken::new(),
         Arc::new(|_: &str, _: &str| {}) as OutputCallback,
@@ -353,5 +361,30 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("changed after verification"));
         assert!(!source.path().join("verified.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn preserves_and_applies_patches_larger_than_the_log_limit() {
+        let source = tempfile::tempdir().unwrap();
+        tests_support::init_repo(source.path()).await;
+        let base = git(source.path(), &["rev-parse", "HEAD"]).await.unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        let (worktree, _) = create_worktree(source.path(), managed.path(), "large-patch", &base)
+            .await
+            .unwrap();
+        let content = "large exact patch line\n".repeat(60_000);
+        std::fs::write(worktree.join("large.txt"), &content).unwrap();
+
+        let patch = diff(&worktree, &base).await.unwrap();
+        assert!(patch.len() > 1_000_000);
+        assert!(!patch.contains("Duet truncated"));
+        let digest = patch_sha256(&worktree, &base).await.unwrap();
+        apply_worktree_changes(source.path(), &worktree, &base, &digest)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(source.path().join("large.txt")).unwrap(),
+            content
+        );
     }
 }
