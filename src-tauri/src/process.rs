@@ -72,10 +72,6 @@ pub async fn run_process(request: ProcessRequest, cancel: CancellationToken, cal
     Ok(ProcessOutput { success: status.success(), exit_code: status.code(), stdout: stdout_text, stderr: stderr_text, duration_ms: started.elapsed().as_millis() as u64 })
 }
 
-pub async fn run_quiet(program: &str, args: &[&str], cwd: &std::path::Path, timeout: Duration) -> Result<ProcessOutput> {
-    run_process(ProcessRequest { program: program.into(), args: args.iter().map(|s| (*s).into()).collect(), cwd: cwd.into(), timeout, env: vec![] }, CancellationToken::new(), Arc::new(|_, _| {})).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
