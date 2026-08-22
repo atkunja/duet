@@ -6,6 +6,7 @@ mod graph;
 mod models;
 mod process;
 mod prompts;
+mod tooling;
 mod verification;
 mod workflow;
 
