@@ -6,11 +6,11 @@ use crate::{
 use anyhow::{anyhow, Context, Result};
 use futures::future::join_all;
 use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio_util::sync::CancellationToken;
 
-pub struct WorkflowContext {
-    pub app: AppHandle,
+pub struct WorkflowContext<R:Runtime=tauri::Wry> {
+    pub app: AppHandle<R>,
     pub db: Arc<Database>,
     pub worktrees_root: PathBuf,
     pub run_id: String,
@@ -18,7 +18,7 @@ pub struct WorkflowContext {
     pub cancel: CancellationToken,
 }
 
-pub async fn execute(ctx: WorkflowContext) -> Result<()> {
+pub async fn execute<R:Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     let mut task_graph = graph::default_workflow();
     task_graph.validate()?;
     let project = ctx.db.get_project(&ctx.request.project_id)?;
@@ -32,10 +32,13 @@ pub async fn execute(ctx: WorkflowContext) -> Result<()> {
     let (worktree, branch) = git::create_worktree(&repo, &ctx.worktrees_root, &ctx.run_id, &inspection.head_sha).await.context("create isolated Git worktree")?;
     ctx.db.set_run_worktree(&ctx.run_id, &branch, &worktree.to_string_lossy())?;
 
-    let codex_path = resolve_binary("codex").context("Codex CLI was not found in PATH or standard local install directories")?;
-    let claude_path = resolve_binary("claude").context("Claude Code was not found in PATH or standard local install directories")?;
-    let codex: Box<dyn Agent> = if ctx.request.mock_agents { Box::new(MockAgent{agent_name:"Codex"}) } else { Box::new(CodexAgent{binary:codex_path}) };
-    let claude: Box<dyn Agent> = if ctx.request.mock_agents { Box::new(MockAgent{agent_name:"Claude"}) } else { Box::new(ClaudeAgent{binary:claude_path}) };
+    let (codex,claude):(Box<dyn Agent>,Box<dyn Agent>)=if ctx.request.mock_agents {
+        (Box::new(MockAgent{agent_name:"Codex"}),Box::new(MockAgent{agent_name:"Claude"}))
+    }else{
+        let codex_path = resolve_binary("codex").context("Codex CLI was not found in PATH or standard local install directories")?;
+        let claude_path = resolve_binary("claude").context("Claude Code was not found in PATH or standard local install directories")?;
+        (Box::new(CodexAgent{binary:codex_path}),Box::new(ClaudeAgent{binary:claude_path}))
+    };
 
     let overview = format!("Path: {}\nBranch: {}\nBase SHA: {}\nLanguage: {}\nBuild system: {}\nDirty source tree: {}", worktree.display(), inspection.branch, inspection.head_sha, inspection.language, inspection.build_system, inspection.dirty);
     let architecture_result = run_agent(&ctx, codex.as_ref(), AgentRole::Architect, "architect", &worktree, prompts::architect(&ctx.request.task, &overview)).await?;
@@ -76,7 +79,7 @@ pub async fn execute(ctx: WorkflowContext) -> Result<()> {
     else { emit(&ctx, RunEvent::RunFailed{run_id:ctx.run_id.clone(),reason:"Repair limit reached with unresolved failures".into()}); Err(anyhow!("repair limit reached with unresolved failures")) }
 }
 
-async fn run_agent(ctx:&WorkflowContext, agent:&dyn Agent, role:AgentRole, stage:&str, worktree:&Path, prompt:String) -> Result<crate::agents::AgentResult> {
+async fn run_agent<R:Runtime>(ctx:&WorkflowContext<R>, agent:&dyn Agent, role:AgentRole, stage:&str, worktree:&Path, prompt:String) -> Result<crate::agents::AgentResult> {
     ctx.db.set_run_stage(&ctx.run_id, stage)?;
     let stage_id = ctx.db.start_stage(&ctx.run_id, stage, agent.name())?;
     emit(ctx, RunEvent::StageStarted{run_id:ctx.run_id.clone(),stage:stage.into(),agent:agent.name().into()});
@@ -93,7 +96,7 @@ async fn run_agent(ctx:&WorkflowContext, agent:&dyn Agent, role:AgentRole, stage
     }
 }
 
-async fn run_verification(ctx:&WorkflowContext, worktree:&Path) -> Result<Vec<VerificationResult>> {
+async fn run_verification<R:Runtime>(ctx:&WorkflowContext<R>, worktree:&Path) -> Result<Vec<VerificationResult>> {
     ctx.db.set_run_stage(&ctx.run_id,"verify")?;
     let stage_id=ctx.db.start_stage(&ctx.run_id,"verify","Duet")?;
     emit(ctx,RunEvent::StageStarted{run_id:ctx.run_id.clone(),stage:"verify".into(),agent:"Duet".into()});
@@ -112,7 +115,7 @@ async fn run_verification(ctx:&WorkflowContext, worktree:&Path) -> Result<Vec<Ve
     Ok(results)
 }
 
-async fn perform_review(ctx:&WorkflowContext, codex:&dyn Agent, worktree:&Path, architecture:&str, verification_results:&[VerificationResult]) -> Result<crate::models::ReviewResult> {
+async fn perform_review<R:Runtime>(ctx:&WorkflowContext<R>, codex:&dyn Agent, worktree:&Path, architecture:&str, verification_results:&[VerificationResult]) -> Result<crate::models::ReviewResult> {
     let full_diff=git::diff(worktree).await?;
     let diff=if full_diff.len()>300_000 { format!("{}\n…[diff truncated]",&full_diff[..full_diff.floor_char_boundary(300_000)]) } else { full_diff };
     let result=run_agent(ctx,codex,AgentRole::Reviewer,"review",worktree,prompts::reviewer(&ctx.request.task,architecture,&diff,&verification::summarize(verification_results))).await?;
@@ -121,7 +124,21 @@ async fn perform_review(ctx:&WorkflowContext, codex:&dyn Agent, worktree:&Path, 
     emit(ctx,RunEvent::ReviewCompleted{run_id:ctx.run_id.clone(),verdict:review.verdict.clone(),issues:review.issues.len()}); Ok(review)
 }
 
-async fn refresh_changes(ctx:&WorkflowContext,worktree:&Path)->Result<()> { let files=git::changed_files(worktree).await?; for file in &files{emit(ctx,RunEvent::FileChanged{run_id:ctx.run_id.clone(),path:file.path.clone()});} ctx.db.replace_changed_files(&ctx.run_id,&files)?; Ok(()) }
+async fn refresh_changes<R:Runtime>(ctx:&WorkflowContext<R>,worktree:&Path)->Result<()> { let files=git::changed_files(worktree).await?; for file in &files{emit(ctx,RunEvent::FileChanged{run_id:ctx.run_id.clone(),path:file.path.clone()});} ctx.db.replace_changed_files(&ctx.run_id,&files)?; Ok(()) }
 fn required_checks_pass(results:&[VerificationResult])->bool { results.iter().all(|r|!r.required||r.success) }
-fn output_callback(ctx:&WorkflowContext,stage:&str)->OutputCallback { let app=ctx.app.clone();let db=ctx.db.clone();let run_id=ctx.run_id.clone();let stage=stage.to_string();Arc::new(move|stream,line|{let event=RunEvent::AgentOutput{run_id:run_id.clone(),stage:stage.clone(),stream:stream.into(),line:line.into()};let _=db.add_event(&run_id,"agentOutput",&serde_json::to_string(&event).unwrap_or_default());let _=app.emit("duet://run-event",event);}) }
-fn emit(ctx:&WorkflowContext,event:RunEvent){let kind=match &event{RunEvent::RunStarted{..}=>"runStarted",RunEvent::StageStarted{..}=>"stageStarted",RunEvent::AgentOutput{..}=>"agentOutput",RunEvent::StageCompleted{..}=>"stageCompleted",RunEvent::FileChanged{..}=>"fileChanged",RunEvent::VerificationCompleted{..}=>"verificationCompleted",RunEvent::ReviewCompleted{..}=>"reviewCompleted",RunEvent::RunCompleted{..}=>"runCompleted",RunEvent::RunFailed{..}=>"runFailed",RunEvent::RunCancelled{..}=>"runCancelled"};let payload=serde_json::to_string(&event).unwrap_or_default();let _=ctx.db.add_event(&ctx.run_id,kind,&payload);let _=ctx.app.emit("duet://run-event",event);}
+fn output_callback<R:Runtime>(ctx:&WorkflowContext<R>,stage:&str)->OutputCallback { let app=ctx.app.clone();let db=ctx.db.clone();let run_id=ctx.run_id.clone();let stage=stage.to_string();Arc::new(move|stream,line|{let event=RunEvent::AgentOutput{run_id:run_id.clone(),stage:stage.clone(),stream:stream.into(),line:line.into()};let _=db.add_event(&run_id,"agentOutput",&serde_json::to_string(&event).unwrap_or_default());let _=app.emit("duet://run-event",event);}) }
+fn emit<R:Runtime>(ctx:&WorkflowContext<R>,event:RunEvent){let kind=match &event{RunEvent::RunStarted{..}=>"runStarted",RunEvent::StageStarted{..}=>"stageStarted",RunEvent::AgentOutput{..}=>"agentOutput",RunEvent::StageCompleted{..}=>"stageCompleted",RunEvent::FileChanged{..}=>"fileChanged",RunEvent::VerificationCompleted{..}=>"verificationCompleted",RunEvent::ReviewCompleted{..}=>"reviewCompleted",RunEvent::RunCompleted{..}=>"runCompleted",RunEvent::RunFailed{..}=>"runFailed",RunEvent::RunCancelled{..}=>"runCancelled"};let payload=serde_json::to_string(&event).unwrap_or_default();let _=ctx.db.add_event(&ctx.run_id,kind,&payload);let _=ctx.app.emit("duet://run-event",event);}
+
+#[cfg(test)]
+mod tests{
+    use super::*;use crate::models::Project;use chrono::Utc;
+    #[tokio::test]
+    async fn completes_the_full_mock_workflow_in_an_isolated_worktree(){
+        let source=tempfile::tempdir().unwrap();crate::git::tests_support::init_repo(source.path()).await;
+        let inspection=git::inspect_repository(source.path()).await.unwrap();let data=tempfile::tempdir().unwrap();let db=Arc::new(Database::open(&data.path().join("test.sqlite3")).unwrap());
+        let project=Project{id:"project".into(),name:"fixture".into(),path:inspection.path.clone(),language:inspection.language,build_system:inspection.build_system,test_command:"test -f DUET_MOCK_RESULT.md".into(),benchmark_command:String::new(),last_used_at:Utc::now().to_rfc3339()};db.upsert_project(&project).unwrap();
+        let run_id="mock-workflow-run".to_string();db.create_run(&run_id,&project.id,"Add a documented mock result",&inspection.head_sha).unwrap();let app=tauri::test::mock_app();
+        execute(WorkflowContext{app:app.handle().clone(),db:db.clone(),worktrees_root:data.path().join("worktrees"),run_id:run_id.clone(),request:StartRunRequest{project_id:project.id,task:"Add a documented mock result".into(),test_command:"test -f DUET_MOCK_RESULT.md".into(),benchmark_command:None,max_repairs:3,mock_agents:true},cancel:CancellationToken::new()}).await.unwrap();
+        let result=db.get_run(&run_id).unwrap();assert_eq!(result.run.status,"completed");assert!(result.verification.iter().all(|v|v.success));assert!(result.changed_files.iter().any(|f|f.path=="DUET_MOCK_RESULT.md"));assert!(!source.path().join("DUET_MOCK_RESULT.md").exists());
+    }
+}
