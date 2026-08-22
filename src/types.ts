@@ -9,6 +9,17 @@ export interface RunDetail extends RunSummary { stages:StageRecord[]; architectu
 export interface ToolStatus { installed:boolean; authenticated?:boolean; path?:string; version?:string; detail:string }
 export interface DoctorReport { appDataWritable:boolean; databaseHealthy:boolean; git:ToolStatus; claude:ToolStatus; codex:ToolStatus; os:string }
 export interface CodexModelInfo { id:string; model:string; displayName:string; hidden:boolean; defaultReasoningEffort?:string; supportedReasoningEfforts:{reasoningEffort:string;description?:string}[]; inputModalities:string[]; supportsPersonality:boolean; isDefault:boolean; upgrade?:string }
+export interface CodexThreadInfo { id:string; sessionId?:string; preview?:string; ephemeral:boolean; modelProvider?:string; createdAt?:number }
+export interface CodexTurnInfo { id:string; status:string; items:unknown[]; error?:unknown }
+export interface CodexRuntimeEnvelope { sequence:number; event:
+  | {kind:"notification";method:string;params:Record<string,unknown>}
+  | {kind:"serverRequest";token:string;method:string;params:Record<string,unknown>}
+  | {kind:"serverRequestResolved";token:string;resolution:string}
+  | {kind:"serverRequestRejected";method:string;reason:string}
+  | {kind:"notificationStreamLagged";skipped:number}
+  | {kind:"fatalProtocolError";message:string}
+  | {kind:"shuttingDown"}
+  | {kind:"closed"} }
 
 export type RunEvent =
   | {type:"runStarted";runId:string;task:string}

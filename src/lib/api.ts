@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CodexModelInfo, DoctorReport, Project, RepoInspection, RunDetail, RunSummary, StartRunRequest, VerificationResult } from "../types";
+import type { CodexModelInfo, CodexThreadInfo, CodexTurnInfo, DoctorReport, Project, RepoInspection, RunDetail, RunSummary, StartRunRequest, VerificationResult } from "../types";
 import { demoDoctor, demoProject, demoRun, demoRuns, demoVerification } from "./demo";
 
 export const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -37,6 +37,16 @@ export const api = {
       { id:"gpt-5.6-terra", model:"gpt-5.6-terra", displayName:"GPT-5.6 Terra", hidden:false, defaultReasoningEffort:"medium", supportedReasoningEfforts:[], inputModalities:["text","image"], supportsPersonality:true, isDefault:false },
     ],
   ),
+  startCodexThread: (projectId:string,model:string) => nativeOrDemo(
+    () => invoke<CodexThreadInfo>("start_codex_thread",{projectId,model}),
+    () => ({id:`demo-thread-${projectId}`,sessionId:`demo-thread-${projectId}`,preview:"",ephemeral:false,modelProvider:"openai"}),
+  ),
+  startCodexTurn: (projectId:string,threadId:string,prompt:string,model:string,effort:string) => nativeOrDemo(
+    () => invoke<CodexTurnInfo>("start_codex_turn",{projectId,threadId,prompt,model,effort}),
+    () => ({id:`demo-turn-${Date.now()}`,status:"inProgress",items:[]}),
+  ),
+  interruptCodexTurn: (threadId:string,turnId:string) => invoke<void>("interrupt_codex_turn",{threadId,turnId}),
+  rejectCodexRequest: (token:string) => invoke<void>("reject_codex_request",{token}),
 };
 
 export function errorMessage(error:unknown):string {
