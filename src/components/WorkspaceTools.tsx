@@ -29,7 +29,7 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
     const off = listen<ConsoleOutputEvent>("duet://console-output", ({ payload }) => {
       if (disposed || payload.operationId !== operationRef.current) return;
       setLiveOutput(value => `${value}${payload.chunk}`.slice(-1_000_000));
-      requestAnimationFrame(() => outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight }));
+      requestAnimationFrame(() => scrollOutput(outputRef.current));
     });
     return () => { disposed = true; void off.then(unlisten => unlisten()); };
   }, [native]);
@@ -50,7 +50,7 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
     try {
       const next = await api.runProjectCommand(project.id, nextCommand.trim(), operationId);
       setResult(next);
-      requestAnimationFrame(() => outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight }));
+      requestAnimationFrame(() => scrollOutput(outputRef.current));
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -111,6 +111,15 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
       {loadedUrl ? <iframe sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" key={`${loadedUrl}-${reloadKey}`} title="Local application preview" src={loadedUrl}/> : <div className="preview-empty"><Globe2/><strong>Preview a local app</strong><p>Start its development server in Console, then load the localhost URL here.</p></div>}
     </section>
   </aside>;
+}
+
+function scrollOutput(output: HTMLPreElement | null) {
+  if (!output) return;
+  if (typeof output.scrollTo === "function") {
+    output.scrollTo({ top: output.scrollHeight });
+  } else {
+    output.scrollTop = output.scrollHeight;
+  }
 }
 
 export function normalizeLocalUrl(value: string) {
