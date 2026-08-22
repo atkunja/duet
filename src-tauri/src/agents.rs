@@ -43,11 +43,17 @@ pub trait Agent: Send + Sync {
     ) -> Result<AgentResult>;
 }
 
+#[derive(Clone)]
 pub struct CodexAgent {
     pub binary: PathBuf,
+    pub model: String,
+    pub reasoning: String,
 }
+#[derive(Clone)]
 pub struct ClaudeAgent {
     pub binary: PathBuf,
+    pub model: String,
+    pub reasoning: String,
 }
 
 #[async_trait]
@@ -72,6 +78,10 @@ impl Agent for CodexAgent {
                     "exec".into(),
                     "--json".into(),
                     "--ephemeral".into(),
+                    "--model".into(),
+                    self.model.clone(),
+                    "--config".into(),
+                    format!("model_reasoning_effort=\"{}\"", self.reasoning),
                     "--skip-git-repo-check".into(),
                     "--sandbox".into(),
                     sandbox.into(),
@@ -120,6 +130,10 @@ impl Agent for ClaudeAgent {
             "--safe-mode".into(),
             "--no-chrome".into(),
             "--no-session-persistence".into(),
+            "--model".into(),
+            self.model.clone(),
+            "--effort".into(),
+            self.reasoning.clone(),
         ];
         if matches!(request.role, AgentRole::Implementer | AgentRole::Repair) {
             args.extend(["--permission-mode".into(), "acceptEdits".into()]);
