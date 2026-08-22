@@ -30,7 +30,7 @@ The machine has the final say. A positive model review never overrides a failing
 - Create one app-managed branch and worktree for every run. Agents never edit the selected working tree.
 - Stream typed lifecycle events and stdout/stderr from cancellable, timeout-bounded Tokio subprocesses.
 - Run Codex as architect/reviewer and Claude as implementer/repairer through supported headless CLI modes.
-- Run required tests and optional benchmarks independently of model opinion.
+- Run a required test/build command and any configured benchmark independently of model opinion.
 - Repeat review/repair up to a user-selected bound and stop on repeated no-op repairs.
 - Persist projects, runs, stages, raw output, normalized output, verification, reviews, changed files, and events in SQLite.
 - Reopen historical runs after restart; active runs become `interrupted` rather than incorrectly appearing complete.
@@ -40,7 +40,9 @@ The machine has the final say. A positive model review never overrides a failing
 
 ## Privacy and safety
 
-Duet has no Duet cloud service and contains no OpenAI or Anthropic API client. Source code, prompts, logs, diffs, and run history remain in the operating system's application-data directory. The official local agent CLIs may make their normal service connections under their own terms and authentication.
+Duet has no Duet cloud service and contains no OpenAI or Anthropic API client. Run history, logs, and managed worktrees remain in the operating system's application-data directory. The official local agent CLIs receive the task, relevant source context, and diffs and may make their normal service connections under their own terms and authentication.
+
+Only add repositories you trust. Duet constrains Codex with its CLI sandbox and runs Claude in safe mode from the managed worktree, but it is not an operating-system security boundary against malicious repository instructions, hooks, tools, or configuration.
 
 Duet does not automatically merge, commit, push, force-update, or mutate a remote. Removing a project only removes it from Duet. Discarding a run checks that its path is inside Duet's managed worktree directory before asking Git to remove it.
 
@@ -101,7 +103,7 @@ Native tests and checks:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 ```
 
 Frontend tests:
@@ -188,12 +190,15 @@ No state is scattered into a selected repository except files an agent intention
 - **CLI missing:** Open Settings & Doctor and confirm the executable path. Launching Duet from Finder can have a narrower `PATH` than your shell; support for manual executable selection is planned.
 - **Authentication unknown:** Run `claude auth status` or `codex login status` in Terminal. Some CLI versions do not expose a machine-readable status.
 - **Worktree creation fails:** Ensure the repository has at least one commit and no conflicting `duet/run-*` branch.
+- **Run start is blocked:** Commit or stash changes in the original repository first. Duet deliberately starts from a clean, recorded commit.
 - **Apply is blocked:** The original repository must still be on the run's base commit and have a clean working tree. This is intentional.
 - **Run interrupted:** The prior process cannot be reattached after an application exit. Duet preserves its worktree and marks the run interrupted.
 
 ## Current limitations
 
 - V1 targets macOS and emits a unified diff; side-by-side diff mode is not yet included.
+- Public macOS distribution still requires a Developer ID certificate, hardened runtime signing, and Apple notarization; local builds are ad-hoc signed.
+- Repositories and their local configuration must be trusted; the Claude CLI safe mode is not an OS-level write sandbox.
 - CLI authentication detection depends on each installed CLI's status command and may report “not detectable.”
 - Agent escalation (Codex implementing after repeated Claude failures) is represented by role-independent adapters but is not exposed as an automatic policy yet.
 - `duet.toml` is documented and modeled conceptually but GUI command overrides are the active configuration path in V1.
