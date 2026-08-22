@@ -293,7 +293,11 @@ pub struct ToolStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum RunEvent {
     RunStarted {
         run_id: String,
@@ -340,4 +344,22 @@ pub enum RunEvent {
     RunCancelled {
         run_id: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunEvent;
+
+    #[test]
+    fn run_events_serialize_field_names_for_the_frontend() {
+        let value = serde_json::to_value(RunEvent::RunStarted {
+            run_id: "run-123".into(),
+            task: "Fix the event contract".into(),
+        })
+        .unwrap();
+
+        assert_eq!(value["type"], "runStarted");
+        assert_eq!(value["runId"], "run-123");
+        assert!(value.get("run_id").is_none());
+    }
 }
