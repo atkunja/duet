@@ -754,6 +754,7 @@ pub struct ActiveTurn {
 impl ActiveTurn {
     pub async fn next_notification(&mut self) -> Result<ServerNotification, AppServerError> {
         tokio::select! {
+            biased;
             notification = self.notifications.recv() => map_notification(notification),
             _ = self.client.inner.closed.cancelled() => Err(self.client.closed_error()),
         }
