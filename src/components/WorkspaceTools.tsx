@@ -1,7 +1,8 @@
-import { ExternalLink, Globe2, Play, RotateCw, TerminalSquare, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { ExternalLink, Globe2, Play, RotateCw, Square, TerminalSquare, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { Project, VerificationResult } from "../types";
+import { listen } from "@tauri-apps/api/event";
+import type { ConsoleOutputEvent, Project, VerificationResult } from "../types";
 import { api, errorMessage, isDevelopmentPreview, isTauriRuntime } from "../lib/api";
 
 type ToolTab = "console" | "preview";
@@ -10,15 +11,28 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
   const [tab, setTab] = useState<ToolTab>("console");
   const [command, setCommand] = useState(project.testCommand || "git status --short");
   const [result, setResult] = useState<VerificationResult>();
+  const [liveOutput, setLiveOutput] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [url, setUrl] = useState("http://127.0.0.1:3000");
   const [loadedUrl, setLoadedUrl] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const outputRef = useRef<HTMLPreElement>(null);
+  const operationRef = useRef("");
   const native = isTauriRuntime;
   const canRun = native || isDevelopmentPreview;
   const output = useMemo(() => result ? [result.stdout, result.stderr].filter(Boolean).join("\n") : "", [result]);
+
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    const off = listen<ConsoleOutputEvent>("duet://console-output", ({ payload }) => {
+      if (disposed || payload.operationId !== operationRef.current) return;
+      setLiveOutput(value => `${value}${payload.chunk}`.slice(-1_000_000));
+      requestAnimationFrame(() => outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight }));
+    });
+    return () => { disposed = true; void off.then(unlisten => unlisten()); };
+  }, [native]);
 
   const run = async (nextCommand = command) => {
     if (!nextCommand.trim() || running || !canRun) return;
@@ -26,8 +40,11 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
     setRunning(true);
     setError("");
     setResult(undefined);
+    setLiveOutput("");
+    const operationId = crypto.randomUUID();
+    operationRef.current = operationId;
     try {
-      const next = await api.runProjectCommand(project.id, nextCommand.trim());
+      const next = await api.runProjectCommand(project.id, nextCommand.trim(), operationId);
       setResult(next);
       requestAnimationFrame(() => outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight }));
     } catch (cause) {
@@ -35,6 +52,12 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
     } finally {
       setRunning(false);
     }
+  };
+
+  const stop = async () => {
+    if (!native || !operationRef.current) return;
+    try { await api.cancelProjectCommand(operationRef.current); }
+    catch (cause) { setError(errorMessage(cause)); }
   };
 
   const openPreview = () => {
@@ -57,11 +80,11 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
         <button onClick={() => run("git status --short --branch")} disabled={running || !canRun}>Git status</button>
         {project.testCommand && <button onClick={() => run(project.testCommand)} disabled={running || !canRun}>Run tests</button>}
       </div>
-      <pre ref={outputRef} aria-live="polite">{running ? `$ ${command}\n\nRunning…` : result ? `$ ${result.command}\n\n${output || "Command completed without output."}\n\n[exit ${result.exitCode ?? "—"} · ${result.durationMs}ms]` : canRun ? "Run a project command without leaving Duet." : "The command console is available in the native Duet app."}</pre>
+      <pre ref={outputRef} aria-live="polite">{running ? `$ ${command}\n\n${liveOutput || "Running…"}` : result ? `$ ${result.command}\n\n${output || "Command completed without output."}\n\n[exit ${result.exitCode ?? "—"} · ${result.durationMs}ms]` : canRun ? "Run a project command without leaving Duet." : "The command console is available in the native Duet app."}</pre>
       {error && <p className="console-error" role="alert">{error}</p>}
       <div className="console-input">
         <span>$</span><input aria-label="Project command" value={command} onChange={event => setCommand(event.target.value)} onKeyDown={event => { if (event.key === "Enter") run(); }} disabled={running}/>
-        <button aria-label="Run command" onClick={() => run()} disabled={!command.trim() || running || !canRun}><Play size={13} fill="currentColor"/></button>
+        {running && native ? <button aria-label="Stop command" onClick={stop}><Square size={12} fill="currentColor"/></button> : <button aria-label="Run command" onClick={() => run()} disabled={!command.trim() || running || !canRun}><Play size={13} fill="currentColor"/></button>}
       </div>
     </section> : <section className="preview-tool" role="tabpanel">
       <div className="preview-bar">
