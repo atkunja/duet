@@ -32,6 +32,9 @@ export const api = {
   applyChanges: (runId:string) => invoke<void>("apply_changes",{runId}),
   discardRun: (runId:string) => invoke<void>("discard_run",{runId}),
   doctor: () => nativeOrDemo(() => invoke<DoctorReport>("doctor"), () => demoDoctor),
+  loginCodex: () => nativeOrDemo(() => invoke<DoctorReport["codex"]>("login_codex"), () => demoDoctor.codex),
+  codexAuthInProgress: () => nativeOrDemo(() => invoke<boolean>("codex_auth_in_progress"), () => false),
+  cancelCodexLogin: () => nativeOrDemo(() => invoke<void>("cancel_codex_login"), () => undefined),
   getPreferences: () => nativeOrDemo<AppPreferences>(() => invoke<AppPreferences>("get_preferences"), () => ({editor:"auto",maxRepairs:3})),
   savePreferences: (preferences:AppPreferences) => nativeOrDemo(() => invoke<void>("save_preferences",{preferences}), () => undefined),
   listCodexModels: () => nativeOrDemo(

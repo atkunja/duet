@@ -32,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 type CommandResult<T> = Result<T, String>;
+const CODEX_AUTH_OPERATION: &str = "auth:codex";
+
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -40,7 +42,13 @@ async fn codex_runtime(
     app: &AppHandle,
     state: &State<'_, AppState>,
 ) -> CommandResult<ManagedCodexRuntime> {
+    if state.active_runs.lock().contains_key(CODEX_AUTH_OPERATION) {
+        return Err("Codex sign-in is in progress".into());
+    }
     let mut server = state.codex_server.lock().await;
+    if state.active_runs.lock().contains_key(CODEX_AUTH_OPERATION) {
+        return Err("Codex sign-in is in progress".into());
+    }
     retire_closed_codex_runtime(app, state, &mut server);
     if let Some(managed) = server.as_ref() {
         return Ok(managed.clone());
@@ -447,20 +455,23 @@ pub async fn start_run(
         return Err("The selected repository has uncommitted changes. Commit or stash them before starting Duet so the isolated base and later apply operation are unambiguous.".into());
     }
     let run_id = Uuid::new_v4().to_string();
-    state
-        .db
-        .create_run(
-            &run_id,
-            &request.project_id,
-            request.task.trim(),
-            &inspection.head_sha,
-        )
-        .map_err(err)?;
     let cancel = CancellationToken::new();
-    state
-        .active_runs
-        .lock()
-        .insert(run_id.clone(), cancel.clone());
+    {
+        let mut active = state.active_runs.lock();
+        if active.contains_key(CODEX_AUTH_OPERATION) {
+            return Err("Wait for Codex sign-in to finish or cancel it in Settings".into());
+        }
+        active.insert(run_id.clone(), cancel.clone());
+    }
+    if let Err(error) = state.db.create_run(
+        &run_id,
+        &request.project_id,
+        request.task.trim(),
+        &inspection.head_sha,
+    ) {
+        state.active_runs.lock().remove(&run_id);
+        return Err(err(error));
+    }
     let ctx = WorkflowContext {
         app: app.clone(),
         db: state.db.clone(),
@@ -539,10 +550,14 @@ pub async fn run_project_command(
     let token = CancellationToken::new();
     let event_operation_id = operation_id.clone();
     let operation_id = format!("console:{operation_id}");
-    state
-        .active_runs
-        .lock()
-        .insert(operation_id.clone(), token.clone());
+    {
+        let mut active = state.active_runs.lock();
+        if active.contains_key(CODEX_AUTH_OPERATION) {
+            state.run_operations.lock().remove(&operation_key);
+            return Err("Wait for Codex sign-in to finish or cancel it in Settings".into());
+        }
+        active.insert(operation_id.clone(), token.clone());
+    }
     let result = verification::execute(
         VerificationItem {
             name: "Command console".into(),
@@ -934,6 +949,84 @@ pub async fn doctor(state: State<'_, AppState>) -> CommandResult<DoctorReport> {
         codex,
         os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
     })
+}
+
+#[tauri::command]
+pub async fn login_codex(state: State<'_, AppState>) -> CommandResult<ToolStatus> {
+    let path = resolve_binary("codex")
+        .ok_or_else(|| "Install the Codex CLI before signing in".to_string())?;
+    let token = CancellationToken::new();
+    {
+        let mut active = state.active_runs.lock();
+        if active.contains_key(CODEX_AUTH_OPERATION) {
+            return Err("Codex sign-in is already in progress".into());
+        }
+        if !active.is_empty() {
+            return Err("Stop active runs and console commands before signing in to Codex".into());
+        }
+        active.insert(CODEX_AUTH_OPERATION.into(), token.clone());
+    }
+
+    let result = async {
+        if let Some(managed) = state.codex_server.lock().await.take() {
+            state.codex_threads.lock().clear();
+            managed.runtime.shutdown().await.map_err(err)?;
+        }
+        let output = run_process(
+            ProcessRequest {
+                program: path.to_string_lossy().into_owned(),
+                args: vec!["login".into()],
+                cwd: state
+                    .worktrees_root
+                    .parent()
+                    .unwrap_or(&state.worktrees_root)
+                    .to_path_buf(),
+                timeout: Duration::from_secs(10 * 60),
+                env: vec![],
+                stdin: None,
+                capture_limit: 64 * 1024,
+                fail_on_output_limit: false,
+            },
+            token,
+            Arc::new(|_, _| {}),
+        )
+        .await
+        .map_err(err)?;
+        if !output.success {
+            return Err(if output.exit_code.is_none() {
+                "Codex sign-in was cancelled or timed out".into()
+            } else {
+                "Codex sign-in did not complete".into()
+            });
+        }
+        let status = tool_status("codex", &["--version"], Some(&["login", "status"])).await;
+        if status.authenticated != Some(true) {
+            return Err(
+                "Codex finished the login flow, but authentication could not be confirmed".into(),
+            );
+        }
+        Ok(status)
+    }
+    .await;
+    state.active_runs.lock().remove(CODEX_AUTH_OPERATION);
+    result
+}
+
+#[tauri::command]
+pub fn codex_auth_in_progress(state: State<'_, AppState>) -> bool {
+    state.active_runs.lock().contains_key(CODEX_AUTH_OPERATION)
+}
+
+#[tauri::command]
+pub fn cancel_codex_login(state: State<'_, AppState>) -> CommandResult<()> {
+    let token = state
+        .active_runs
+        .lock()
+        .get(CODEX_AUTH_OPERATION)
+        .cloned()
+        .ok_or_else(|| "Codex sign-in is not running".to_string())?;
+    token.cancel();
+    Ok(())
 }
 
 async fn tool_status(name: &str, version_args: &[&str], auth_args: Option<&[&str]>) -> ToolStatus {

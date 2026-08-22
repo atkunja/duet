@@ -59,7 +59,17 @@ pub fn run() {
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data)?;
-            let instance_lock = acquire_instance_lock(&data)?;
+            let Some(instance_lock) = acquire_instance_lock(&data)? else {
+                // Another Duet already owns this data directory. Returning an error
+                // here panics inside a non-unwinding AppKit callback, which aborts the
+                // process before any window appears and looks exactly like Duet failing
+                // to launch at all, so leave deliberately instead.
+                eprintln!(
+                    "Duet is already running and owns {}.\nQuit the existing Duet window before starting another copy.",
+                    data.display()
+                );
+                std::process::exit(0);
+            };
             let db = Arc::new(Database::open(&data.join("duet.sqlite3"))?);
             db.interrupt_active_runs()?;
             app.manage(AppState {
@@ -132,6 +142,9 @@ pub fn run() {
             commands::apply_changes,
             commands::discard_run,
             commands::doctor,
+            commands::login_codex,
+            commands::codex_auth_in_progress,
+            commands::cancel_codex_login,
             commands::get_preferences,
             commands::save_preferences,
             commands::list_codex_models,
@@ -139,21 +152,40 @@ pub fn run() {
             commands::start_codex_turn,
             commands::interrupt_codex_turn
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Duet");
+        .build(tauri::generate_context!())
+        .expect("failed to run Duet")
+        .run(|app, event| {
+            // macOS keeps an application alive after its last window closes. Duet has
+            // nothing to do without a window, and a lingering process keeps holding the
+            // instance lock, which makes every later launch fail. Leave instead.
+            if let tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } = event
+            {
+                if app.webview_windows().is_empty() {
+                    app.exit(0);
+                }
+            }
+        });
 }
 
-fn acquire_instance_lock(data: &Path) -> anyhow::Result<File> {
+/// Takes ownership of the data directory for this process.
+///
+/// Returns `Ok(None)` when another live Duet already holds the lock, so callers can
+/// leave quietly. An `Err` means the lock file itself could not be opened. The lock is
+/// released by the kernel when the owning process dies, so a crash cannot strand it.
+fn acquire_instance_lock(data: &Path) -> anyhow::Result<Option<File>> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(data.join("duet.lock"))?;
-    FileExt::try_lock_exclusive(&file).map_err(|_| {
-        anyhow::anyhow!("Duet is already running. Use the existing window to manage active runs.")
-    })?;
-    Ok(file)
+    if FileExt::try_lock_exclusive(&file).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(file))
 }
 
 #[cfg(test)]
@@ -163,7 +195,7 @@ mod tests {
     #[test]
     fn only_one_instance_can_own_the_data_directory() {
         let directory = tempfile::tempdir().unwrap();
-        let _owner = acquire_instance_lock(directory.path()).unwrap();
-        assert!(acquire_instance_lock(directory.path()).is_err());
+        let _owner = acquire_instance_lock(directory.path()).unwrap().unwrap();
+        assert!(acquire_instance_lock(directory.path()).unwrap().is_none());
     }
 }
