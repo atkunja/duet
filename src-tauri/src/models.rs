@@ -1,0 +1,177 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub language: String,
+    pub build_system: String,
+    pub test_command: String,
+    pub benchmark_command: String,
+    pub last_used_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoInspection {
+    pub path: String,
+    pub branch: String,
+    pub head_sha: String,
+    pub dirty: bool,
+    pub language: String,
+    pub build_system: String,
+    pub suggested_test_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRunRequest {
+    pub project_id: String,
+    pub task: String,
+    pub test_command: String,
+    pub benchmark_command: Option<String>,
+    pub max_repairs: u8,
+    #[serde(default)]
+    pub mock_agents: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummary {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub task: String,
+    pub status: String,
+    pub current_stage: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub worktree_path: Option<String>,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageRecord {
+    pub id: i64,
+    pub run_id: String,
+    pub kind: String,
+    pub agent: String,
+    pub status: String,
+    pub summary: String,
+    pub raw_output: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDetail {
+    #[serde(flatten)]
+    pub run: RunSummary,
+    pub stages: Vec<StageRecord>,
+    pub architecture: Option<String>,
+    pub review: Option<String>,
+    pub verification: Vec<VerificationResult>,
+    pub changed_files: Vec<ChangedFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: String,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationResult {
+    pub name: String,
+    pub command: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewIssue {
+    pub severity: String,
+    pub category: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub problem: String,
+    pub reason: String,
+    pub suggested_fix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewResult {
+    pub verdict: String,
+    pub summary: String,
+    #[serde(default)]
+    pub issues: Vec<ReviewIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchitecturePlan {
+    pub goal: String,
+    pub summary: String,
+    #[serde(default)]
+    pub files_to_modify: Vec<String>,
+    #[serde(default)]
+    pub files_to_add: Vec<String>,
+    #[serde(default)]
+    pub implementation_steps: Vec<String>,
+    #[serde(default)]
+    pub risks: Vec<String>,
+    #[serde(default)]
+    pub tests_required: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorReport {
+    pub app_data_writable: bool,
+    pub database_healthy: bool,
+    pub git: ToolStatus,
+    pub claude: ToolStatus,
+    pub codex: ToolStatus,
+    pub os: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolStatus {
+    pub installed: bool,
+    pub authenticated: Option<bool>,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RunEvent {
+    RunStarted { run_id: String, task: String },
+    StageStarted { run_id: String, stage: String, agent: String },
+    AgentOutput { run_id: String, stage: String, stream: String, line: String },
+    StageCompleted { run_id: String, stage: String, success: bool, summary: String },
+    FileChanged { run_id: String, path: String },
+    VerificationCompleted { run_id: String, result: VerificationResult },
+    ReviewCompleted { run_id: String, verdict: String, issues: usize },
+    RunCompleted { run_id: String, verified: bool },
+    RunFailed { run_id: String, reason: String },
+    RunCancelled { run_id: String },
+}
