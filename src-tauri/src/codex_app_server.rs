@@ -912,7 +912,7 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             };
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
-        let count = newline.map_or(available.len(), |position| position);
+        let count = newline.unwrap_or(available.len());
         if line.len().saturating_add(count) > max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
