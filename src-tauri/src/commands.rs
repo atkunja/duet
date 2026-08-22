@@ -1,7 +1,7 @@
-use crate::{git, models::{DoctorReport, Project, RepoInspection, RunDetail, RunSummary, StartRunRequest, ToolStatus}, workflow::{self, WorkflowContext}, AppState};
+use crate::{git, models::{DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest, ToolStatus}, workflow::{self, WorkflowContext}, AppState};
 use chrono::Utc;
 use std::{path::{Path, PathBuf}, process::Command};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -39,8 +39,8 @@ pub async fn start_run(app:AppHandle,state:State<'_,AppState>,request:StartRunRe
     let active=state.active_runs.clone(); let db=state.db.clone(); let task_id=run_id.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error)=workflow::execute(ctx).await {
-            if cancel.is_cancelled(){let _=db.complete_run(&task_id,"cancelled",Some("cancelled by user"));}
-            else {let _=db.complete_run(&task_id,"failed",Some(&error.to_string()));}
+            if cancel.is_cancelled(){let _=db.complete_run(&task_id,"cancelled",Some("cancelled by user"));let _=app.emit("duet://run-event",RunEvent::RunCancelled{run_id:task_id.clone()});}
+            else {let reason=error.to_string();let _=db.complete_run(&task_id,"failed",Some(&reason));let _=app.emit("duet://run-event",RunEvent::RunFailed{run_id:task_id.clone(),reason});}
         }
         active.lock().remove(&task_id);
     });
