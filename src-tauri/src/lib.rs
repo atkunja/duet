@@ -32,7 +32,14 @@ pub struct AppState {
     active_runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     run_operations: Arc<Mutex<HashSet<String>>>,
     codex_server: Arc<AsyncMutex<Option<codex_runtime::CodexRuntime>>>,
+    codex_threads: Arc<Mutex<HashMap<String, CodexThreadOwner>>>,
     _instance_lock: File,
+}
+
+#[derive(Clone)]
+struct CodexThreadOwner {
+    project_id: String,
+    cwd: String,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -53,6 +60,7 @@ pub fn run() {
                 active_runs: Arc::new(Mutex::new(HashMap::new())),
                 run_operations: Arc::new(Mutex::new(HashSet::new())),
                 codex_server: Arc::new(AsyncMutex::new(None)),
+                codex_threads: Arc::new(Mutex::new(HashMap::new())),
                 _instance_lock: instance_lock,
             });
             Ok(())
@@ -114,9 +122,7 @@ pub fn run() {
             commands::list_codex_models,
             commands::start_codex_thread,
             commands::start_codex_turn,
-            commands::interrupt_codex_turn,
-            commands::respond_codex_request,
-            commands::reject_codex_request
+            commands::interrupt_codex_turn
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Duet");

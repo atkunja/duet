@@ -118,6 +118,7 @@ pub enum RuntimeRequestResolution {
     RespondedError,
     TimedOut,
     ShuttingDown,
+    ClearedByServer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +272,7 @@ impl CodexRuntime {
                 notifications,
                 inner.state.clone(),
                 inner.events.clone(),
+                inner.deadline_changed.clone(),
                 inner.stop.clone(),
             )),
             tokio::spawn(server_request_pump(
@@ -593,6 +595,7 @@ async fn notification_pump(
     mut receiver: broadcast::Receiver<ServerNotification>,
     state: Arc<Mutex<RuntimeState>>,
     events: broadcast::Sender<SequencedRuntimeEvent>,
+    deadline_changed: Arc<Notify>,
     stop: CancellationToken,
 ) {
     loop {
@@ -600,14 +603,24 @@ async fn notification_pump(
             biased;
             _ = stop.cancelled() => break,
             message = receiver.recv() => match message {
-                Ok(notification) => publish_event(
-                    &state,
-                    &events,
-                    CodexRuntimeEvent::Notification {
-                        method: notification.method,
-                        params: notification.params,
-                    },
-                ).await,
+                Ok(notification) => {
+                    if notification.method == "serverRequest/resolved" {
+                        clear_server_resolved_request(
+                            &state,
+                            &events,
+                            &deadline_changed,
+                            &notification.params,
+                        ).await;
+                    }
+                    publish_event(
+                        &state,
+                        &events,
+                        CodexRuntimeEvent::Notification {
+                            method: notification.method,
+                            params: notification.params,
+                        },
+                    ).await;
+                },
                 Err(broadcast::error::RecvError::Lagged(skipped)) => publish_event(
                     &state,
                     &events,
@@ -617,6 +630,33 @@ async fn notification_pump(
             }
         }
     }
+}
+
+async fn clear_server_resolved_request(
+    state: &Mutex<RuntimeState>,
+    events: &broadcast::Sender<SequencedRuntimeEvent>,
+    deadline_changed: &Notify,
+    params: &Value,
+) {
+    let Some(request_id) = params.get("requestId") else {
+        return;
+    };
+    let mut state = state.lock().await;
+    let token = state
+        .pending
+        .iter()
+        .find_map(|(token, pending)| (pending.protocol_id == *request_id).then(|| token.clone()));
+    let Some(token) = token else {
+        return;
+    };
+    state.pending.remove(&token);
+    let event = state.record(CodexRuntimeEvent::ServerRequestResolved {
+        token,
+        resolution: RuntimeRequestResolution::ClearedByServer,
+    });
+    let _ = events.send(event);
+    drop(state);
+    deadline_changed.notify_one();
 }
 
 async fn server_request_pump(
@@ -1067,6 +1107,48 @@ while read_line; do :; done
             )
         })
         .await;
+        fake.runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_resolution_clears_a_pending_request_without_a_late_response() {
+        let script = format!(
+            "{HANDSHAKE}{}",
+            r#"
+read_line
+printf '%s\n' '{"id":"approval-1","method":"item/fileChange/requestApproval","params":{"threadId":"thr_resolved"}}'
+printf '%s\n' '{"method":"serverRequest/resolved","params":{"threadId":"thr_resolved","requestId":"approval-1"}}'
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thr_resolved","ephemeral":false}}}'
+while read_line; do :; done
+"#
+        );
+        let fake = fake_runtime(&script, Duration::from_millis(80)).await;
+        let thread = fake
+            .runtime
+            .start_thread(ThreadStartParams::default())
+            .await
+            .unwrap();
+        assert_eq!(thread.thread.id, "thr_resolved");
+        let mut events = fake.runtime.subscribe_events().await;
+        let resolved = next_matching(&mut events, |event| {
+            matches!(
+                event,
+                CodexRuntimeEvent::ServerRequestResolved {
+                    resolution: RuntimeRequestResolution::ClearedByServer,
+                    ..
+                }
+            )
+        })
+        .await;
+        let token = match resolved.event {
+            CodexRuntimeEvent::ServerRequestResolved { token, .. } => token,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            fake.runtime.respond_success(&token, Value::Null).await,
+            Err(CodexRuntimeError::UnknownRequestToken)
+        ));
+        tokio::time::sleep(Duration::from_millis(120)).await;
         fake.runtime.shutdown().await.unwrap();
     }
 

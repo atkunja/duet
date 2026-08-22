@@ -3,7 +3,7 @@ use crate::{
         AppServerConfig, AppServerError, ClientInfo, ModelInfo, ModelListParams, ThreadStartParams,
         TurnStartParams,
     },
-    codex_runtime::{CodexRuntime, CodexRuntimeConfig, CodexRuntimeError, RuntimeRequestToken},
+    codex_runtime::{CodexRuntime, CodexRuntimeConfig, CodexRuntimeError, CodexRuntimeEvent},
     git,
     models::{
         DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest,
@@ -13,7 +13,7 @@ use crate::{
     tooling::resolve_binary,
     verification::{self, VerificationItem},
     workflow::{self, WorkflowContext},
-    AppState,
+    AppState, CodexThreadOwner,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -40,6 +40,7 @@ async fn codex_runtime(
     let mut server = state.codex_server.lock().await;
     if server.as_ref().is_some_and(CodexRuntime::is_closed) {
         *server = None;
+        state.codex_threads.lock().clear();
     }
     if let Some(client) = server.as_ref() {
         return Ok(client.clone());
@@ -51,11 +52,49 @@ async fn codex_runtime(
     )))
     .await
     .map_err(err)?;
-    let mut events = runtime.subscribe_events().await;
     let event_app = app.clone();
+    let event_runtime = runtime.clone();
+    let thread_owners = state.codex_threads.clone();
     tauri::async_runtime::spawn(async move {
-        while let Ok(event) = events.recv().await {
-            let _ = event_app.emit("duet://codex-event", event);
+        let mut last_sequence = 0;
+        loop {
+            let mut events = event_runtime.subscribe_events().await;
+            loop {
+                match events.recv().await {
+                    Ok(event) if event.sequence <= last_sequence => continue,
+                    Ok(event) => {
+                        last_sequence = event.sequence;
+                        match &event.event {
+                            CodexRuntimeEvent::ServerRequest { token, .. } => {
+                                if event_runtime
+                                    .respond_error(
+                                        token,
+                                        -32_002,
+                                        "Duet's read-only assistant declined this request",
+                                        None,
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    let _ = event_runtime.shutdown().await;
+                                    return;
+                                }
+                            }
+                            CodexRuntimeEvent::Closed => {
+                                thread_owners.lock().clear();
+                                let _ = event_app.emit("duet://codex-event", event);
+                                return;
+                            }
+                            _ => {
+                                let _ = event_app.emit("duet://codex-event", event);
+                            }
+                        }
+                    }
+                    Err(CodexRuntimeError::EventStreamLagged(_)) => break,
+                    Err(CodexRuntimeError::EventStreamClosed) => return,
+                    Err(_) => return,
+                }
+            }
         }
     });
     *server = Some(runtime.clone());
@@ -74,6 +113,7 @@ pub async fn list_codex_models(
             let mut server = state.codex_server.lock().await;
             if server.as_ref().is_some_and(CodexRuntime::is_closed) {
                 *server = None;
+                state.codex_threads.lock().clear();
             }
             drop(server);
             let retry = codex_runtime(&app, &state).await?;
@@ -122,13 +162,14 @@ pub async fn start_codex_thread(
     model: String,
 ) -> CommandResult<crate::codex_app_server::ThreadInfo> {
     let project = state.db.get_project(&project_id).map_err(err)?;
+    let cwd = canonical_path(&project.path)?;
     let response = codex_runtime(&app, &state)
         .await?
         .start_thread(ThreadStartParams {
             model: Some(model),
-            cwd: Some(project.path),
+            cwd: Some(cwd.clone()),
             approval_policy: Some("never".into()),
-            sandbox: Some("readOnly".into()),
+            sandbox: Some("read-only".into()),
             personality: Some("friendly".into()),
             service_name: Some("duet_desktop".into()),
             ephemeral: true,
@@ -136,6 +177,10 @@ pub async fn start_codex_thread(
         })
         .await
         .map_err(err)?;
+    state.codex_threads.lock().insert(
+        response.thread.id.clone(),
+        CodexThreadOwner { project_id, cwd },
+    );
     Ok(response.thread)
 }
 
@@ -153,9 +198,23 @@ pub async fn start_codex_turn(
         return Err("enter a message for Codex".into());
     }
     let project = state.db.get_project(&project_id).map_err(err)?;
+    let project_cwd = canonical_path(&project.path)?;
+    let owner = state
+        .codex_threads
+        .lock()
+        .get(&thread_id)
+        .cloned()
+        .ok_or_else(|| "Codex thread is not owned by this Duet session".to_string())?;
+    if owner.project_id != project_id || owner.cwd != project_cwd {
+        return Err("Codex thread does not belong to this project".into());
+    }
     let mut params = TurnStartParams::text(thread_id, prompt.trim());
-    params.cwd = Some(project.path);
+    params.cwd = Some(owner.cwd);
     params.approval_policy = Some("never".into());
+    params.sandbox_policy = Some(serde_json::json!({
+        "type": "readOnly",
+        "networkAccess": false
+    }));
     params.model = Some(model);
     params.effort = Some(effort);
     codex_runtime(&app, &state)
@@ -170,9 +229,19 @@ pub async fn start_codex_turn(
 pub async fn interrupt_codex_turn(
     app: AppHandle,
     state: State<'_, AppState>,
+    project_id: String,
     thread_id: String,
     turn_id: String,
 ) -> CommandResult<()> {
+    let owner = state
+        .codex_threads
+        .lock()
+        .get(&thread_id)
+        .cloned()
+        .ok_or_else(|| "Codex thread is not owned by this Duet session".to_string())?;
+    if owner.project_id != project_id {
+        return Err("Codex thread does not belong to this project".into());
+    }
     codex_runtime(&app, &state)
         .await?
         .interrupt_turn(&thread_id, &turn_id)
@@ -180,36 +249,10 @@ pub async fn interrupt_codex_turn(
         .map_err(err)
 }
 
-#[tauri::command]
-pub async fn respond_codex_request(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    token: RuntimeRequestToken,
-    result: serde_json::Value,
-) -> CommandResult<()> {
-    codex_runtime(&app, &state)
-        .await?
-        .respond_success(&token, result)
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn reject_codex_request(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    token: RuntimeRequestToken,
-) -> CommandResult<()> {
-    codex_runtime(&app, &state)
-        .await?
-        .respond_error(
-            &token,
-            -32_002,
-            "Duet's read-only assistant declined this request",
-            None,
-        )
-        .await
-        .map_err(err)
+fn canonical_path(path: &str) -> CommandResult<String> {
+    std::fs::canonicalize(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| format!("could not resolve project path: {error}"))
 }
 
 #[tauri::command]

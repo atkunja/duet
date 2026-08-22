@@ -45,8 +45,7 @@ export const api = {
     () => invoke<CodexTurnInfo>("start_codex_turn",{projectId,threadId,prompt,model,effort}),
     () => ({id:`demo-turn-${Date.now()}`,status:"inProgress",items:[]}),
   ),
-  interruptCodexTurn: (threadId:string,turnId:string) => invoke<void>("interrupt_codex_turn",{threadId,turnId}),
-  rejectCodexRequest: (token:string) => invoke<void>("reject_codex_request",{token}),
+  interruptCodexTurn: (projectId:string,threadId:string,turnId:string) => invoke<void>("interrupt_codex_turn",{projectId,threadId,turnId}),
 };
 
 export function errorMessage(error:unknown):string {
