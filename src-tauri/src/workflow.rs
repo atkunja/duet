@@ -127,7 +127,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
     refresh_changes(&ctx, &worktree, &base_sha).await?;
 
     let mut verification_results = run_verification(&ctx, &worktree).await?;
-    let mut review = perform_review(
+    let (mut review, mut reviewed_patch_sha256) = perform_review_snapshot(
         &ctx,
         codex.as_ref(),
         &worktree,
@@ -179,7 +179,7 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
         last_diff = new_diff;
         refresh_changes(&ctx, &worktree, &base_sha).await?;
         verification_results = run_verification(&ctx, &worktree).await?;
-        review = perform_review(
+        (review, reviewed_patch_sha256) = perform_review_snapshot(
             &ctx,
             codex.as_ref(),
             &worktree,
@@ -195,8 +195,8 @@ pub async fn execute<R: Runtime>(ctx: WorkflowContext<R>) -> Result<()> {
 
     let verified = required_checks_pass(&verification_results) && review.verdict == "pass";
     if verified {
-        let digest = git::patch_sha256(&worktree, &base_sha).await?;
-        ctx.db.set_verified_patch_sha256(&ctx.run_id, &digest)?;
+        ctx.db
+            .set_verified_patch_sha256(&ctx.run_id, &reviewed_patch_sha256)?;
     }
     ctx.db.complete_run(
         &ctx.run_id,
@@ -427,22 +427,48 @@ async fn run_verification<R: Runtime>(
     Ok(results)
 }
 
-async fn perform_review<R: Runtime>(
+async fn perform_review_snapshot<R: Runtime>(
     ctx: &WorkflowContext<R>,
     codex: &dyn Agent,
     worktree: &Path,
     base_sha: &str,
     architecture: &str,
     verification_results: &[VerificationResult],
-) -> Result<crate::models::ReviewResult> {
+) -> Result<(crate::models::ReviewResult, String)> {
     let full_diff = git::diff(worktree, base_sha).await?;
+    let reviewed_patch_sha256 = git::patch_content_sha256(&full_diff);
+    let review = perform_review(
+        ctx,
+        codex,
+        worktree,
+        architecture,
+        verification_results,
+        &full_diff,
+    )
+    .await?;
+    let current_patch_sha256 = git::patch_sha256(worktree, base_sha).await?;
+    anyhow::ensure!(
+        current_patch_sha256 == reviewed_patch_sha256,
+        "the isolated worktree changed during review; verification result was not accepted"
+    );
+    Ok((review, reviewed_patch_sha256))
+}
+
+async fn perform_review<R: Runtime>(
+    ctx: &WorkflowContext<R>,
+    codex: &dyn Agent,
+    worktree: &Path,
+    architecture: &str,
+    verification_results: &[VerificationResult],
+    full_diff: &str,
+) -> Result<crate::models::ReviewResult> {
     let diff = if full_diff.len() > 300_000 {
         format!(
             "{}\n…[diff truncated]",
             &full_diff[..full_diff.floor_char_boundary(300_000)]
         )
     } else {
-        full_diff
+        full_diff.to_string()
     };
     let result = run_agent(
         ctx,
@@ -531,7 +557,9 @@ fn emit<R: Runtime>(ctx: &WorkflowContext<R>, event: RunEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentResult;
     use crate::models::Project;
+    use async_trait::async_trait;
     use chrono::Utc;
     #[tokio::test]
     async fn completes_the_full_mock_workflow_in_an_isolated_worktree() {
@@ -585,5 +613,92 @@ mod tests {
             .iter()
             .any(|f| f.path == "DUET_MOCK_RESULT.md"));
         assert!(!source.path().join("DUET_MOCK_RESULT.md").exists());
+    }
+
+    struct MutatingReviewer;
+
+    #[async_trait]
+    impl Agent for MutatingReviewer {
+        fn name(&self) -> &'static str {
+            "Mutating reviewer"
+        }
+
+        async fn execute(
+            &self,
+            request: AgentRequest,
+            _cancel: CancellationToken,
+        ) -> Result<AgentResult> {
+            std::fs::write(request.worktree.join("late-mutation.txt"), "not verified\n")?;
+            let output = r#"{"verdict":"pass","summary":"looks good","issues":[]}"#.to_string();
+            Ok(AgentResult {
+                success: true,
+                normalized_output: output.clone(),
+                raw_output: output,
+                stderr: String::new(),
+                exit_code: Some(0),
+                duration_ms: 1,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_a_worktree_mutated_during_review() {
+        let source = tempfile::tempdir().unwrap();
+        crate::git::tests_support::init_repo(source.path()).await;
+        let inspection = git::inspect_repository(source.path()).await.unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(&data.path().join("test.sqlite3")).unwrap());
+        let project = Project {
+            id: "project".into(),
+            name: "fixture".into(),
+            path: inspection.path.clone(),
+            language: inspection.language,
+            build_system: inspection.build_system,
+            test_command: "true".into(),
+            benchmark_command: String::new(),
+            last_used_at: Utc::now().to_rfc3339(),
+        };
+        db.upsert_project(&project).unwrap();
+        db.create_run("review-race", &project.id, "task", &inspection.head_sha)
+            .unwrap();
+        let (worktree, branch) = git::create_worktree(
+            source.path(),
+            &data.path().join("worktrees"),
+            "review-race",
+            &inspection.head_sha,
+        )
+        .await
+        .unwrap();
+        std::fs::write(worktree.join("reviewed.txt"), "verified\n").unwrap();
+        db.set_run_worktree("review-race", &branch, &worktree.to_string_lossy())
+            .unwrap();
+        let app = tauri::test::mock_app();
+        let context = WorkflowContext {
+            app: app.handle().clone(),
+            db,
+            worktrees_root: data.path().join("worktrees"),
+            run_id: "review-race".into(),
+            request: StartRunRequest {
+                project_id: project.id,
+                task: "task".into(),
+                test_command: "true".into(),
+                benchmark_command: None,
+                max_repairs: 1,
+                mock_agents: true,
+            },
+            cancel: CancellationToken::new(),
+        };
+
+        let error = perform_review_snapshot(
+            &context,
+            &MutatingReviewer,
+            &worktree,
+            &inspection.head_sha,
+            "{}",
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("changed during review"));
     }
 }
