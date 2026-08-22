@@ -1,7 +1,7 @@
 use crate::{
     agents::{parse_architecture, parse_review, Agent, AgentRequest, AgentRole, ClaudeAgent, CodexAgent, MockAgent},
     db::Database, git, graph::{self, TaskStatus}, models::{RunEvent, StartRunRequest, VerificationResult}, prompts,
-    process::OutputCallback, verification::{self, VerificationItem},
+    process::OutputCallback, tooling::resolve_binary, verification::{self, VerificationItem},
 };
 use anyhow::{anyhow, Context, Result};
 use futures::future::join_all;
@@ -32,8 +32,8 @@ pub async fn execute(ctx: WorkflowContext) -> Result<()> {
     let (worktree, branch) = git::create_worktree(&repo, &ctx.worktrees_root, &ctx.run_id, &inspection.head_sha).await.context("create isolated Git worktree")?;
     ctx.db.set_run_worktree(&ctx.run_id, &branch, &worktree.to_string_lossy())?;
 
-    let codex_path = which::which("codex").context("Codex CLI is not installed or not on PATH")?;
-    let claude_path = which::which("claude").context("Claude Code is not installed or not on PATH")?;
+    let codex_path = resolve_binary("codex").context("Codex CLI was not found in PATH or standard local install directories")?;
+    let claude_path = resolve_binary("claude").context("Claude Code was not found in PATH or standard local install directories")?;
     let codex: Box<dyn Agent> = if ctx.request.mock_agents { Box::new(MockAgent{agent_name:"Codex"}) } else { Box::new(CodexAgent{binary:codex_path}) };
     let claude: Box<dyn Agent> = if ctx.request.mock_agents { Box::new(MockAgent{agent_name:"Claude"}) } else { Box::new(ClaudeAgent{binary:claude_path}) };
 
