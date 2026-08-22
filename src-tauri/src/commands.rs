@@ -1,4 +1,4 @@
-use crate::{git, models::{DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest, ToolStatus}, workflow::{self, WorkflowContext}, AppState};
+use crate::{git, models::{DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest, ToolStatus}, tooling::resolve_binary, workflow::{self, WorkflowContext}, AppState};
 use chrono::Utc;
 use std::{path::{Path, PathBuf}, process::Command};
 use tauri::{AppHandle, Emitter, State};
@@ -87,7 +87,7 @@ pub async fn doctor(state:State<'_,AppState>)->CommandResult<DoctorReport>{
 }
 
 fn tool_status(name:&str,version_args:&[&str],auth_args:Option<&[&str]>)->ToolStatus{
-    let Ok(path)=which::which(name) else{return ToolStatus{installed:false,authenticated:None,path:None,version:None,detail:format!("{name} was not found on PATH")}};
+    let Some(path)=resolve_binary(name) else{return ToolStatus{installed:false,authenticated:None,path:None,version:None,detail:format!("{name} was not found in standard local install directories")}};
     let version=Command::new(&path).args(version_args).output().ok().map(|o|format!("{}{}",String::from_utf8_lossy(&o.stdout),String::from_utf8_lossy(&o.stderr)).trim().to_string());
     let authenticated=auth_args.and_then(|args|Command::new(&path).args(args).output().ok()).map(|o|o.status.success());
     ToolStatus{installed:true,authenticated,path:Some(path.to_string_lossy().into()),version,detail:"Detected locally; Duet never stores API credentials.".into()}
