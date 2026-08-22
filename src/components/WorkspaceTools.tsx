@@ -1,6 +1,5 @@
 import { ExternalLink, Globe2, Play, RotateCw, Square, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import type { ConsoleOutputEvent, Project, VerificationResult } from "../types";
 import { api, errorMessage, isDevelopmentPreview, isTauriRuntime } from "../lib/api";
@@ -33,6 +32,10 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
     });
     return () => { disposed = true; void off.then(unlisten => unlisten()); };
   }, [native]);
+  useEffect(() => () => {
+    const operationId = operationRef.current;
+    if (native && operationId) void api.cancelProjectCommand(operationId).catch(() => {});
+  }, [native]);
 
   const run = async (nextCommand = command) => {
     if (!nextCommand.trim() || running || !canRun) return;
@@ -50,6 +53,7 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
+      operationRef.current = "";
       setRunning(false);
     }
   };
@@ -61,9 +65,15 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
   };
 
   const openPreview = () => {
-    const next = normalizeLocalUrl(url);
-    setUrl(next);
-    setLoadedUrl(next);
+    try {
+      const next = normalizeLocalUrl(url);
+      setUrl(next);
+      setLoadedUrl(next);
+      setError("");
+    } catch (cause) {
+      setLoadedUrl("");
+      setError(errorMessage(cause));
+    }
   };
 
   return <aside className="workspace-tools" aria-label="Workspace tools">
@@ -91,16 +101,20 @@ export function WorkspaceTools({ project, onClose }: { project: Project; onClose
         <input aria-label="Preview URL" value={url} onChange={event => setUrl(event.target.value)} onKeyDown={event => { if (event.key === "Enter") openPreview(); }}/>
         <button aria-label="Load preview" onClick={openPreview}><Play size={13}/></button>
         <button aria-label="Reload preview" onClick={() => setReloadKey(value => value + 1)} disabled={!loadedUrl}><RotateCw size={13}/></button>
-        <button aria-label="Open preview externally" disabled={!loadedUrl} onClick={() => loadedUrl && (native ? openUrl(loadedUrl) : window.open(loadedUrl, "_blank", "noopener"))}><ExternalLink size={13}/></button>
+        <button aria-label="Open preview externally" disabled={!loadedUrl} onClick={() => { if (!loadedUrl) return; if (native) void api.openLocalPreview(loadedUrl).catch(cause => setError(errorMessage(cause))); else window.open(loadedUrl, "_blank", "noopener"); }}><ExternalLink size={13}/></button>
       </div>
-      {loadedUrl ? <iframe key={`${loadedUrl}-${reloadKey}`} title="Local application preview" src={loadedUrl}/> : <div className="preview-empty"><Globe2/><strong>Preview a local app</strong><p>Start its development server in Console, then load the localhost URL here.</p></div>}
+      {error && <p className="console-error" role="alert">{error}</p>}
+      {loadedUrl ? <iframe sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" key={`${loadedUrl}-${reloadKey}`} title="Local application preview" src={loadedUrl}/> : <div className="preview-empty"><Globe2/><strong>Preview a local app</strong><p>Start its development server in Console, then load the localhost URL here.</p></div>}
     </section>}
   </aside>;
 }
 
-function normalizeLocalUrl(value: string) {
+export function normalizeLocalUrl(value: string) {
   const trimmed = value.trim();
-  if (!trimmed) return "http://127.0.0.1:3000";
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `http://${trimmed}`;
+  const candidate = !trimmed ? "http://127.0.0.1:3000" : /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  const parsed = new URL(candidate);
+  if (!['http:', 'https:'].includes(parsed.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) {
+    throw new Error("Preview URLs must use localhost, 127.0.0.1, or ::1");
+  }
+  return parsed.toString();
 }

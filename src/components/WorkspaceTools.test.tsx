@@ -4,11 +4,10 @@ import type { Project } from "../types";
 import { api } from "../lib/api";
 import { WorkspaceTools } from "./WorkspaceTools";
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 const eventState = vi.hoisted(() => ({ listener: undefined as ((event: { payload: { operationId:string;stream:string;chunk:string } }) => void) | undefined }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockImplementation((_event, listener) => { eventState.listener = listener; return Promise.resolve(vi.fn()); }) }));
 vi.mock("../lib/api", () => ({
-  api: { runProjectCommand: vi.fn(), cancelProjectCommand: vi.fn() },
+  api: { runProjectCommand: vi.fn(), cancelProjectCommand: vi.fn().mockResolvedValue(undefined), openLocalPreview: vi.fn().mockResolvedValue(undefined) },
   errorMessage: (error: unknown) => String(error),
   isDevelopmentPreview: false,
   isTauriRuntime: true,
@@ -56,7 +55,17 @@ describe("WorkspaceTools", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Preview URL" }), { target: { value: "localhost:4173" } });
     fireEvent.click(screen.getByRole("button", { name: "Load preview" }));
-    expect(screen.getByTitle("Local application preview")).toHaveAttribute("src", "http://localhost:4173");
+    expect(screen.getByTitle("Local application preview")).toHaveAttribute("src", "http://localhost:4173/");
+    expect(screen.getByTitle("Local application preview")).toHaveAttribute("sandbox", expect.not.stringContaining("allow-top-navigation"));
+  });
+
+  it("rejects non-local preview origins", () => {
+    render(<WorkspaceTools project={project} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Preview URL" }), { target: { value: "https://example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Load preview" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/must use localhost/i);
+    expect(screen.queryByTitle("Local application preview")).not.toBeInTheDocument();
   });
 
   it("streams native output and stops the active process tree", async () => {
@@ -76,5 +85,14 @@ describe("WorkspaceTools", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop command" }));
     await waitFor(() => expect(api.cancelProjectCommand).toHaveBeenCalledWith(operationId));
     finish(undefined as never);
+  });
+
+  it("cancels an owned command when the tools panel closes", async () => {
+    vi.mocked(api.runProjectCommand).mockReturnValue(new Promise(() => {}));
+    const { unmount } = render(<WorkspaceTools project={project} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Git status" }));
+    const operationId = await waitFor(() => vi.mocked(api.runProjectCommand).mock.calls[0][2]);
+    unmount();
+    expect(api.cancelProjectCommand).toHaveBeenCalledWith(operationId);
   });
 });
