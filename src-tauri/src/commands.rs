@@ -4,12 +4,17 @@ use crate::{
         DoctorReport, Project, RepoInspection, RunDetail, RunEvent, RunSummary, StartRunRequest,
         ToolStatus,
     },
+    process::{run_process, OutputCallback, ProcessRequest},
     tooling::resolve_binary,
     workflow::{self, WorkflowContext},
     AppState,
 };
 use chrono::Utc;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -197,10 +202,14 @@ pub async fn apply_changes(state: State<'_, AppState>, run_id: String) -> Comman
         let worktree = info
             .worktree_path
             .ok_or_else(|| "run has no worktree".to_string())?;
+        let verified_patch_sha256 = info.verified_patch_sha256.ok_or_else(|| {
+            "this run has no recorded verified patch; apply is unavailable".to_string()
+        })?;
         git::apply_worktree_changes(
             Path::new(&info.repo_path),
             Path::new(&worktree),
             &info.base_sha,
+            &verified_patch_sha256,
         )
         .await
         .map_err(err)?;
@@ -248,51 +257,72 @@ async fn discard_inner(
         .worktree_path
         .ok_or_else(|| "run is already discarded or has no worktree".to_string())?;
     let path = PathBuf::from(&worktree);
-    let canonical = path.canonicalize().map_err(err)?;
-    let expected = state
-        .worktrees_root
-        .join(run_id)
-        .join("implementation")
-        .canonicalize()
-        .map_err(err)?;
-    if canonical != expected {
+    let expected_path = state.worktrees_root.join(run_id).join("implementation");
+    let exact_match = if path.exists() {
+        path.canonicalize().map_err(err)? == expected_path.canonicalize().map_err(err)?
+    } else {
+        path == expected_path
+    };
+    if !exact_match {
         return Err(
             "refusing to remove a worktree that does not exactly match this Duet run".into(),
         );
     }
-    let command = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(&info.repo_path)
-        .args(["worktree", "remove", "--force", &worktree])
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command)
-        .await
-        .map_err(|_| "Git worktree removal timed out".to_string())?
-        .map_err(err)?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into());
+    if path.exists() {
+        let output = run_git_operation(
+            &info.repo_path,
+            vec![
+                "worktree".into(),
+                "remove".into(),
+                "--force".into(),
+                worktree.clone(),
+            ],
+            Duration::from_secs(30),
+        )
+        .await?;
+        if !output.success {
+            return Err(output.stderr);
+        }
     }
-    state.db.mark_discarded(run_id).map_err(err)?;
     if let Some(branch) = info.branch.filter(|b| b.starts_with("duet/run-")) {
-        let command = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&info.repo_path)
-            .args(["branch", "-D", &branch])
-            .output();
-        let output = tokio::time::timeout(std::time::Duration::from_secs(20), command)
-            .await
-            .map_err(|_| {
-                "worktree was removed, but temporary branch cleanup timed out".to_string()
-            })?
-            .map_err(err)?;
-        if !output.status.success() {
+        let output = run_git_operation(
+            &info.repo_path,
+            vec!["branch".into(), "-D".into(), branch],
+            Duration::from_secs(20),
+        )
+        .await?;
+        if !output.success {
             return Err(format!(
                 "worktree was discarded, but temporary branch cleanup failed: {}",
-                String::from_utf8_lossy(&output.stderr)
+                output.stderr
             ));
         }
     }
+    state.db.mark_discarded(run_id).map_err(err)?;
     Ok(())
+}
+
+async fn run_git_operation(
+    repo: &str,
+    mut args: Vec<String>,
+    timeout: Duration,
+) -> CommandResult<crate::process::ProcessOutput> {
+    let binary = resolve_binary("git").ok_or_else(|| "Git executable not found".to_string())?;
+    args.splice(0..0, ["-C".into(), repo.into()]);
+    run_process(
+        ProcessRequest {
+            program: binary.to_string_lossy().into(),
+            args,
+            cwd: PathBuf::from(repo),
+            timeout,
+            env: vec![],
+            stdin: None,
+        },
+        CancellationToken::new(),
+        Arc::new(|_: &str, _: &str| {}) as OutputCallback,
+    )
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
